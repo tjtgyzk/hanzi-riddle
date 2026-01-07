@@ -1,0 +1,731 @@
+# -*- coding: utf-8 -*-
+
+import argparse
+import json
+import os
+import time
+from urllib.parse import parse_qs, urlparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Optional, Dict, List
+
+from .engine import Game
+from .ai_client import AIClient
+from .db import (
+    init_db,
+    upsert_user,
+    bind_session,
+    get_user_by_session,
+    get_user_id_by_session,
+    record_result,
+    get_leaderboard,
+    list_ai_profiles,
+    upsert_ai_profile,
+    delete_ai_profile,
+    set_active_ai_profile,
+    get_active_ai_config,
+)
+from .puzzles import PUZZLE_DIR, load_puzzles
+
+# 静态资源目录（前端页面）
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+# 进度存档文件（按 session_id 保存）
+SESSION_FILE = Path(__file__).resolve().parents[1] / "data" / "sessions.json"
+
+
+class ChineseArgumentParser(argparse.ArgumentParser):
+    """将 argparse 的默认英文提示替换为中文。"""
+
+    def format_usage(self) -> str:
+        return super().format_usage().replace("usage:", "用法:")
+
+    def format_help(self) -> str:
+        text = super().format_help()
+        text = text.replace("usage:", "用法:")
+        text = text.replace("optional arguments:", "可选参数:")
+        text = text.replace("options:", "选项:")
+        return text
+
+
+def _choose_puzzle(puzzles: list, puzzle_id: Optional[str]) -> dict:
+    """按 id 选择题目；不传 id 时默认第一个。"""
+    if puzzle_id is None:
+        return puzzles[0]
+    for puzzle in puzzles:
+        if puzzle.get("id") == puzzle_id:
+            return puzzle
+    raise ValueError(f"题目不存在: {puzzle_id}")
+
+
+class GameStore:
+    """当前游戏会话（单人本地试玩，支持多题目进度保存）。"""
+
+    def __init__(self) -> None:
+        # 所有题目的游戏实例（用于历史与进度）
+        self.games: Dict[str, Game] = {}
+        # 当前激活的题目 id
+        self.current_id: Optional[str] = None
+        # 每道题的 AI 上一步结果
+        self.last_ai: Dict[str, dict] = {}
+
+    def start(self, puzzle_id: Optional[str], mode: str) -> dict:
+        """开始或恢复一局游戏。mode: resume/restart"""
+        puzzles = load_puzzles(PUZZLE_DIR)
+        puzzle = _choose_puzzle(puzzles, puzzle_id)
+        puzzle_id = puzzle["id"]
+
+        if mode == "resume" and puzzle_id in self.games:
+            self.current_id = puzzle_id
+            return self.games[puzzle_id].get_state()
+
+        if mode not in ("resume", "restart"):
+            raise ValueError("启动模式不支持，请使用 resume 或 restart。")
+
+        game = Game(title=puzzle["title"], body=puzzle["body"], puzzle_id=puzzle_id)
+        self.games[puzzle_id] = game
+        self.current_id = puzzle_id
+        self.last_ai.pop(puzzle_id, None)
+        return game.get_state()
+
+    def get_state(self) -> Optional[dict]:
+        if self.current_id is None:
+            return None
+        game = self.games.get(self.current_id)
+        if game is None:
+            return None
+        return game.get_state()
+
+    def guess(self, ch: str) -> dict:
+        if self.current_id is None:
+            raise RuntimeError("当前没有进行中的游戏，请先开始游戏。")
+        game = self.games.get(self.current_id)
+        if game is None:
+            raise RuntimeError("当前游戏状态已丢失，请重新开始。")
+        result = game.guess(ch)
+        return {"status": result.status, "reason": result.reason, "state": result.state}
+
+    def list_puzzles(self, puzzles: List[dict]) -> List[dict]:
+        """为题目列表附加进度状态。"""
+        output = []
+        for index, puzzle in enumerate(puzzles, start=1):
+            puzzle_id = puzzle["id"]
+            game = self.games.get(puzzle_id)
+            if game is None:
+                status = "未开始"
+                guess_count = 0
+                is_complete = False
+            else:
+                is_complete = game.is_complete()
+                status = "已完成" if is_complete else "进行中"
+                guess_count = game.guess_count
+            output.append(
+                {
+                    "id": puzzle_id,
+                    "index": index,
+                    "status": status,
+                    "guess_count": guess_count,
+                    "is_complete": is_complete,
+                    "is_current": puzzle_id == self.current_id,
+                    "title": puzzle.get("title", ""),
+                    "created_at": puzzle.get("created_at", ""),
+                }
+            )
+        return output
+
+    def ai_step(self, ai_config: Optional[dict]) -> dict:
+        """执行一步最短解（使用标题字符的最短序列）。"""
+        if self.current_id is None:
+            raise RuntimeError("当前没有进行中的游戏，请先开始游戏。")
+        game = self.games.get(self.current_id)
+        if game is None:
+            raise RuntimeError("当前游戏状态已丢失，请重新开始。")
+
+        if game.is_complete():
+            return {"done": True, "state": game.get_state()}
+
+        previous_step = self.last_ai.get(self.current_id)
+        client = AIClient(ai_config)
+        attempts = 0
+        last_reason = "未提供原因。"
+        last_result = None
+        last_guess = ""
+        state = game.get_state()
+        guessed_correct = set(state.get("guessed_correct", []) or [])
+        guessed_wrong = set(state.get("guessed_wrong", []) or [])
+        forbidden = guessed_correct | guessed_wrong
+
+        while attempts < 3:
+            attempts += 1
+            ai_output = client.choose_next_guess(state, previous_step)
+            next_char = str(ai_output.get("guess", "")).strip()
+            reason = str(ai_output.get("reason", "")).strip() or "未提供原因。"
+            if not next_char or len(next_char) != 1:
+                previous_step = {"status": "invalid", "guess": next_char}
+                last_reason = reason
+                continue
+            if next_char in forbidden:
+                previous_step = {"status": "repeat", "guess": next_char}
+                last_reason = reason
+                continue
+            result = game.guess(next_char)
+            last_result = result
+            last_reason = reason
+            last_guess = next_char
+            break
+
+        if last_result is None:
+            raise RuntimeError("AI 多次输出重复或非法字符，请稍后重试。")
+
+        self.last_ai[self.current_id] = {
+            "guess": last_guess,
+            "reason": last_reason,
+            "status": last_result.status,
+        }
+        return {
+            "done": False,
+            "guess": last_guess,
+            "reason": last_reason,
+            "result": {"status": last_result.status, "reason": last_result.reason, "state": last_result.state},
+        }
+
+    def to_persist_dict(self) -> dict:
+        """导出当前会话的持久化数据。"""
+        return {
+            "current_id": self.current_id,
+            "games": {puzzle_id: game.export_progress() for puzzle_id, game in self.games.items()},
+        }
+
+    def load_from_persist(self, data: dict, puzzle_map: Dict[str, dict]) -> None:
+        """根据持久化数据恢复会话内的题目进度。"""
+        self.current_id = data.get("current_id")
+        games_data = data.get("games", {})
+        for puzzle_id, progress in games_data.items():
+            puzzle = puzzle_map.get(puzzle_id)
+            if not puzzle:
+                continue
+            game = Game(title=puzzle["title"], body=puzzle["body"], puzzle_id=puzzle_id)
+            game.apply_progress(progress)
+            self.games[puzzle_id] = game
+
+
+class SessionManager:
+    """多用户会话管理：按 user_id 区分游戏进度。"""
+
+    def __init__(self, storage_path: Path) -> None:
+        self.storage_path = storage_path
+        self.user_stores: Dict[str, GameStore] = {}
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """加载历史存档到内存。"""
+        if not self.storage_path.exists():
+            return
+        try:
+            raw = self.storage_path.read_text(encoding="utf-8")
+            data = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return
+
+        try:
+            puzzles = load_puzzles(PUZZLE_DIR)
+        except Exception:
+            puzzles = []
+        puzzle_map = {puzzle["id"]: puzzle for puzzle in puzzles}
+
+        users_data = data.get("users")
+        if isinstance(users_data, dict) and users_data:
+            for user_id, session_data in users_data.items():
+                store = GameStore()
+                store.load_from_persist(session_data, puzzle_map)
+                self.user_stores[str(user_id)] = store
+            return
+
+        for session_id, session_data in data.get("sessions", {}).items():
+            user_id = get_user_id_by_session(session_id)
+            if not user_id:
+                continue
+            user_key = str(user_id)
+            if user_key in self.user_stores:
+                continue
+            store = GameStore()
+            store.load_from_persist(session_data, puzzle_map)
+            self.user_stores[user_key] = store
+
+    def save(self) -> None:
+        """将当前内存状态写回磁盘。"""
+        data = {"users": {}}
+        for user_id, store in self.user_stores.items():
+            data["users"][str(user_id)] = store.to_persist_dict()
+        _write_json_file(self.storage_path, data)
+
+    def get_store_for_user(self, user_id: int) -> GameStore:
+        """获取指定用户的存档实例，不存在则创建。"""
+        user_key = str(user_id)
+        store = self.user_stores.get(user_key)
+        if store is None:
+            store = GameStore()
+            self.user_stores[user_key] = store
+        return store
+
+    def remove_puzzle(self, puzzle_id: str) -> None:
+        """当题目被覆盖时，移除所有会话中的旧进度。"""
+        changed = False
+        for store in self.user_stores.values():
+            if puzzle_id in store.games:
+                store.games.pop(puzzle_id, None)
+                if store.current_id == puzzle_id:
+                    store.current_id = None
+                changed = True
+        if changed:
+            self.save()
+
+
+def _is_safe_filename_char(ch: str) -> bool:
+    """允许的文件名字符：字母数字、下划线、短横线、汉字。"""
+    if ch.isalnum():
+        return True
+    if ch in ("_", "-"):
+        return True
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+def _sanitize_puzzle_id(raw: str) -> Optional[str]:
+    """清理题目 id，避免路径注入。"""
+    if not raw:
+        return None
+    cleaned = "".join(ch for ch in raw if _is_safe_filename_char(ch))
+    return cleaned or None
+
+
+def _validate_puzzle_id(raw: str) -> Optional[str]:
+    """校验题目 id 是否安全合法。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    cleaned = _sanitize_puzzle_id(raw)
+    if not cleaned or cleaned != raw:
+        return None
+    return cleaned
+
+
+def _create_puzzle_file(puzzle_id: Optional[str], title: str, body: str, overwrite: bool) -> dict:
+    """创建题目文件并返回题目元信息。"""
+    if not title or not title.strip():
+        raise ValueError("标题不能为空。")
+    safe_id = _sanitize_puzzle_id(puzzle_id or "")
+    if not safe_id:
+        safe_id = f"puzzle_{int(time.time())}"
+    file_path = PUZZLE_DIR / f"{safe_id}.txt"
+    existed = file_path.exists()
+    if existed and not overwrite:
+        raise ValueError("题目文件已存在，请更换文件名或勾选覆盖。")
+
+    PUZZLE_DIR.mkdir(parents=True, exist_ok=True)
+    content = title.strip() + "\n" + (body or "").rstrip() + "\n"
+    file_path.write_text(content, encoding="utf-8")
+    return {"id": safe_id, "title": title.strip(), "body": body or "", "overwrote": existed}
+
+
+def _write_json_file(path: Path, data: dict) -> None:
+    """安全写入 JSON 文件，避免中途写坏。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _safe_ai_config_info(ai_config: Optional[dict]) -> str:
+    """输出可用于排查的 AI 配置信息（不包含密钥）。"""
+    if not isinstance(ai_config, dict):
+        return "AI 配置为空"
+    base_url = ai_config.get("base_url", "")
+    model = ai_config.get("model", "")
+    return f"base_url={base_url} model={model}"
+
+
+def _get_admin_password() -> str:
+    return os.environ.get("ADMIN_PASSWORD", "") or "admin"
+
+
+def _is_admin_token(token: str) -> bool:
+    password = _get_admin_password()
+    if not password:
+        return False
+    return token == password
+
+
+init_db()
+SESSION_MANAGER = SessionManager(SESSION_FILE)
+
+
+class RequestHandler(BaseHTTPRequestHandler):
+    """简单的本地 HTTP 服务：提供静态页面与 JSON 接口。"""
+
+    def _send_json(self, payload: dict, status_code: int = 200) -> None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_file(self, file_path: Path, content_type: str) -> None:
+        data = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8")
+        if not raw.strip():
+            return {}
+        return json.loads(raw)
+
+    def _get_session_id(self) -> Optional[str]:
+        """从请求头读取 session_id。"""
+        raw = self.headers.get("X-Session-Id", "")
+        if not raw:
+            return None
+        cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_"))
+        return cleaned or None
+
+    def _require_session_id(self) -> Optional[str]:
+        """确保请求携带有效的 session_id。"""
+        session_id = self._get_session_id()
+        if not session_id:
+            self._send_json({"ok": False, "message": "缺少会话编号，请刷新页面重试。"}, status_code=400)
+            return None
+        return session_id
+
+    def _get_admin_token(self) -> str:
+        return self.headers.get("X-Admin-Token", "")
+
+    def _require_admin(self) -> bool:
+        if not _get_admin_password():
+            self._send_json({"ok": False, "message": "管理员密码未设置。"}, status_code=401)
+            return False
+        token = self._get_admin_token()
+        if not token or not _is_admin_token(token):
+            self._send_json({"ok": False, "message": "管理员验证失败。"}, status_code=401)
+            return False
+        return True
+
+    def _require_user(self) -> Optional[Dict[str, object]]:
+        session_id = self._require_session_id()
+        if not session_id:
+            return None
+        user = get_user_by_session(session_id)
+        if not user:
+            self._send_json({"ok": False, "message": "请先登录，再开始游戏。"}, status_code=401)
+            return None
+        return user
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+        # 静态资源路由
+        if path == "/":
+            return self._send_file(WEB_DIR / "index.html", "text/html; charset=utf-8")
+        if path in ("/admin", "/admin/"):
+            return self._send_file(WEB_DIR / "admin.html", "text/html; charset=utf-8")
+        if path == "/style.css":
+            return self._send_file(WEB_DIR / "style.css", "text/css; charset=utf-8")
+        if path == "/app.js":
+            return self._send_file(WEB_DIR / "app.js", "application/javascript; charset=utf-8")
+        if path == "/admin.js":
+            return self._send_file(WEB_DIR / "admin.js", "application/javascript; charset=utf-8")
+
+        # JSON 接口
+        if path == "/api/puzzles":
+            try:
+                session_id = self._require_session_id()
+                if not session_id:
+                    return None
+                puzzles = load_puzzles(PUZZLE_DIR)
+                user = get_user_by_session(session_id)
+                if user:
+                    store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                else:
+                    store = GameStore()
+                data = store.list_puzzles(puzzles)
+                return self._send_json({"ok": True, "puzzles": data})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=500)
+
+        if path == "/api/state":
+            user = self._require_user()
+            if not user:
+                return None
+            store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+            return self._send_json({"ok": True, "state": store.get_state()})
+
+        if path == "/api/me":
+            session_id = self._require_session_id()
+            if not session_id:
+                return None
+            user = get_user_by_session(session_id)
+            return self._send_json({"ok": True, "user": user})
+
+        if path == "/api/admin/check":
+            if not _get_admin_password():
+                return self._send_json({"ok": False, "message": "管理员密码未设置。"}, status_code=401)
+            token = self._get_admin_token()
+            if token and _is_admin_token(token):
+                return self._send_json({"ok": True})
+            return self._send_json({"ok": False, "message": "管理员验证失败。"}, status_code=401)
+
+        if path == "/api/admin/ai/profiles":
+            if not self._require_admin():
+                return None
+            profiles = list_ai_profiles(include_secret=True)
+            return self._send_json({"ok": True, "profiles": profiles})
+
+        if path == "/api/admin/puzzles":
+            if not self._require_admin():
+                return None
+            puzzles = load_puzzles(PUZZLE_DIR)
+            data = []
+            for puzzle in puzzles:
+                data.append(
+                    {
+                        "id": puzzle.get("id"),
+                        "title": puzzle.get("title", ""),
+                        "body": puzzle.get("body", ""),
+                    }
+                )
+            return self._send_json({"ok": True, "puzzles": data})
+
+        if path == "/api/ai/config":
+            config = get_active_ai_config()
+            if not config:
+                return self._send_json({"ok": True, "configured": False})
+            return self._send_json(
+                {
+                    "ok": True,
+                    "configured": True,
+                    "name": config.get("name", ""),
+                    "base_url": config.get("base_url", ""),
+                    "model": config.get("model", ""),
+                }
+            )
+
+        if path == "/api/leaderboard":
+            puzzle_id = (query.get("puzzle_id") or [""])[0]
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "缺少 puzzle_id。"}, status_code=400)
+            entries = get_leaderboard(puzzle_id, limit=10)
+            return self._send_json({"ok": True, "entries": entries})
+
+        return self._send_json({"ok": False, "message": "未找到对应的接口。"}, status_code=404)
+
+    def do_POST(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except Exception:
+            return self._send_json({"ok": False, "message": "请求体不是合法的 JSON。"}, status_code=400)
+
+        if self.path == "/api/start":
+            user = self._require_user()
+            if not user:
+                return None
+            puzzle_id = payload.get("puzzle_id")
+            mode = payload.get("mode", "resume")
+            try:
+                store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                state = store.start(puzzle_id, mode)
+                SESSION_MANAGER.save()
+                return self._send_json({"ok": True, "state": state})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/guess":
+            user = self._require_user()
+            if not user:
+                return None
+            guess_char = payload.get("ch", "")
+            try:
+                store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                result = store.guess(guess_char)
+                if result["state"].get("is_complete"):
+                    record_result(user["id"], result["state"]["puzzle_id"], result["state"]["guess_count"])
+                SESSION_MANAGER.save()
+                return self._send_json({"ok": True, "result": result})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/ai/step":
+            user = self._require_user()
+            if not user:
+                return None
+            try:
+                store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                ai_config = get_active_ai_config()
+                if not ai_config:
+                    raise RuntimeError("AI 尚未配置，请在管理员页面设置。")
+                result = store.ai_step(ai_config)
+                if result.get("result", {}).get("state", {}).get("is_complete"):
+                    state = result["result"]["state"]
+                    record_result(user["id"], state["puzzle_id"], state["guess_count"])
+                status = result.get("result", {}).get("status")
+                guess = result.get("guess")
+                reason = result.get("reason")
+                print(f"[AI] 猜测={guess} 状态={status} 理由={reason}")
+                SESSION_MANAGER.save()
+                return self._send_json({"ok": True, **result})
+            except Exception as exc:
+                info = _safe_ai_config_info(ai_config if isinstance(ai_config, dict) else None)
+                print(f"[AI] 调用失败: {exc} | {info}")
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/login":
+            session_id = self._require_session_id()
+            if not session_id:
+                return None
+            nickname = str(payload.get("nickname", "")).strip()
+            if not nickname:
+                return self._send_json({"ok": False, "message": "昵称不能为空。"}, status_code=400)
+            if len(nickname) > 20:
+                return self._send_json({"ok": False, "message": "昵称长度不能超过 20。"}, status_code=400)
+            try:
+                user = upsert_user(nickname)
+                bind_session(session_id, int(user["id"]))
+                return self._send_json({"ok": True, "user": user})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/puzzles/create":
+            if not self._require_admin():
+                return None
+            try:
+                puzzle_id = payload.get("puzzle_id")
+                title = payload.get("title", "")
+                body = payload.get("body", "")
+                overwrite = bool(payload.get("overwrite", False))
+                puzzle = _create_puzzle_file(puzzle_id, title, body, overwrite)
+                if overwrite and puzzle.get("overwrote"):
+                    SESSION_MANAGER.remove_puzzle(puzzle["id"])
+                SESSION_MANAGER.save()
+                return self._send_json({"ok": True, "puzzle": {"id": puzzle["id"]}})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/puzzles/generate":
+            if not self._require_admin():
+                return None
+            title = str(payload.get("title", "")).strip()
+            style_hint = str(payload.get("style_hint", "")).strip()
+            if not title:
+                return self._send_json({"ok": False, "message": "标题不能为空。"}, status_code=400)
+            if len(title) > 40:
+                return self._send_json({"ok": False, "message": "标题长度过长。"}, status_code=400)
+            try:
+                ai_config = get_active_ai_config()
+                if not ai_config:
+                    raise RuntimeError("AI 尚未配置，请在管理员页面设置。")
+                client = AIClient(ai_config)
+                body = client.generate_puzzle_body(title, style_hint)
+                return self._send_json({"ok": True, "title": title, "body": body})
+            except Exception as exc:
+                info = _safe_ai_config_info(ai_config if isinstance(ai_config, dict) else None)
+                print(f"[AI] 生成题目失败: {exc} | {info}")
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/ai/profiles":
+            if not self._require_admin():
+                return None
+            name = str(payload.get("name", "")).strip()
+            base_url = str(payload.get("base_url", "")).strip()
+            model = str(payload.get("model", "")).strip()
+            api_key = str(payload.get("api_key", "")).strip()
+            set_active = bool(payload.get("set_active", True))
+            if not name or not base_url or not model or not api_key:
+                return self._send_json({"ok": False, "message": "请完整填写 AI 配置。"}, status_code=400)
+            try:
+                upsert_ai_profile(name, base_url, model, api_key, set_active=set_active)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/ai/active":
+            if not self._require_admin():
+                return None
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                return self._send_json({"ok": False, "message": "缺少配置名称。"}, status_code=400)
+            try:
+                set_active_ai_profile(name)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        return self._send_json({"ok": False, "message": "未找到对应的接口。"}, status_code=404)
+
+    def do_DELETE(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except Exception:
+            return self._send_json({"ok": False, "message": "请求体不是合法的 JSON。"}, status_code=400)
+
+        if self.path == "/api/admin/puzzles":
+            if not self._require_admin():
+                return None
+            puzzle_id = _validate_puzzle_id(str(payload.get("puzzle_id", "")))
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "题目 id 不合法。"}, status_code=400)
+            try:
+                file_path = PUZZLE_DIR / f"{puzzle_id}.txt"
+                if not file_path.exists():
+                    return self._send_json({"ok": False, "message": "题目不存在。"}, status_code=404)
+                file_path.unlink()
+                SESSION_MANAGER.remove_puzzle(puzzle_id)
+                SESSION_MANAGER.save()
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/ai/profiles":
+            if not self._require_admin():
+                return None
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                return self._send_json({"ok": False, "message": "缺少配置名称。"}, status_code=400)
+            try:
+                delete_ai_profile(name)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        return self._send_json({"ok": False, "message": "未找到对应的接口。"}, status_code=404)
+
+    def log_message(self, format: str, *args) -> None:
+        # 保持安静，避免刷屏；需要时可自行打开
+        return
+
+
+def main() -> int:
+    parser = ChineseArgumentParser(description="单字猜谜本地服务。", add_help=False)
+    parser.add_argument("-h", "--help", action="help", help="显示帮助并退出。")
+    parser.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）。")
+    parser.add_argument("--port", type=int, default=8000, help="监听端口（默认 8000）。")
+    args = parser.parse_args()
+
+    server = HTTPServer((args.host, args.port), RequestHandler)
+    print(f"本地服务已启动：http://{args.host}:{args.port}")
+    print("按 Ctrl+C 结束。")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n已停止。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

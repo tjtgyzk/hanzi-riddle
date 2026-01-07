@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>单字猜谜</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div class="hero-title">单字猜谜</div>
+        <div class="hero-subtitle">猜字解题，目标字全出即通关</div>
+      </header>
+
+      <section class="panel select-panel">
+        <div class="panel-title">题目选择</div>
+        <div class="select-row">
+          <label class="label" for="puzzleSelect">题目</label>
+          <select id="puzzleSelect"></select>
+          <button id="startBtn" class="btn primary">开始 / 继续</button>
+          <button id="restartBtn" class="btn ghost">重新开始</button>
+          <button id="refreshBtn" class="btn ghost">刷新题库</button>
+        </div>
+        <div id="progressSummary" class="summary">历史：未开始 0 / 进行中 0 / 已完成 0</div>
+        <div class="hint">
+          题目来自 <code>data/puzzles/</code> 文件夹，首行是标题，其余为正文。
+          <a class="link" href="/admin">管理入口</a>
+        </div>
+      </section>
+
+      <div class="main-grid">
+        <section class="panel game-panel">
+        <div class="panel-title">游戏区</div>
+        <div id="loginNotice" class="login-notice is-hidden">
+          <div>
+            <strong>还差一步</strong>：在右侧账号区输入昵称并点击登录，即可开始游戏。
+          </div>
+          <button id="loginNoticeBtn" class="btn ghost">去登录</button>
+        </div>
+
+          <div class="board">
+          <div class="block paper-block">
+            <div id="contentMasked" class="masked body"></div>
+          </div>
+          </div>
+
+        <div class="controls">
+          <div class="input-stack">
+            <input id="guessInput" type="text" placeholder="可输入多个字，提交需为单字" />
+            <span id="loginBadge" class="login-badge">未登录</span>
+          </div>
+          <button id="guessBtn" class="btn primary">猜</button>
+          <button id="aiBtn" class="btn ghost">AI 最短解</button>
+        </div>
+
+          <div class="status">
+            <div class="meta">
+              <div class="meta-item">
+                <span class="meta-label">已猜次数</span>
+                <span id="guessCount" class="meta-value">0</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">剩余字</span>
+                <span id="titleRemaining" class="meta-value">0</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-label">题目状态</span>
+                <span id="puzzleStatus" class="meta-value">未开始</span>
+              </div>
+            </div>
+            <div class="wrong">
+              <span class="meta-label">已猜错</span>
+              <span id="wrongList" class="meta-value">无</span>
+            </div>
+          <div id="messageBox" class="message">请先选择题目开始。</div>
+          <div class="ai-trace">
+            <div class="ai-trace-header">
+              <span class="meta-label">AI 思路</span>
+              <button id="aiToggleBtn" class="btn ghost small">展开</button>
+            </div>
+            <div id="aiLog" class="ai-log">暂无</div>
+          </div>
+        </div>
+      </section>
+
+        <div class="side-stack">
+          <section id="accountPanel" class="panel account-panel">
+            <div class="panel-title">账号</div>
+            <div class="manage-grid">
+              <div class="hint">仅昵称登录，用于记录成绩与排行榜。</div>
+              <div class="form-row">
+                <label class="label" for="nicknameInput">昵称</label>
+                <input id="nicknameInput" type="text" placeholder="输入昵称" />
+              </div>
+          <div class="form-actions">
+            <button id="loginBtn" class="btn primary">登录 / 切换</button>
+            <span id="currentUser" class="summary">当前：未登录</span>
+            <a class="btn ghost" href="/admin">管理后台</a>
+          </div>
+        </div>
+      </section>
+
+          <section class="panel leaderboard-panel">
+            <div class="panel-title">单题排行榜</div>
+            <div class="manage-grid">
+              <div class="form-row">
+                <label class="label" for="leaderboardSelect">选择题目</label>
+                <select id="leaderboardSelect"></select>
+              </div>
+              <div id="leaderboardEmpty" class="hint">暂无成绩</div>
+              <ol id="leaderboardList" class="leaderboard-list"></ol>
+            </div>
+          </section>
+        </div>
+      </div>
+
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

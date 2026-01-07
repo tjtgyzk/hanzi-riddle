@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>管理后台</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero admin-hero">
+        <div class="hero-title">管理后台</div>
+        <div class="hero-subtitle">AI 配置与题库维护</div>
+        <a class="link back-link" href="/">返回游戏</a>
+      </header>
+
+      <section id="adminGate" class="panel admin-gate">
+        <div class="panel-title">管理员验证</div>
+        <div class="manage-grid">
+          <div class="hint">请输入管理员密码后进入。</div>
+          <div class="form-row">
+            <label class="label" for="adminPassword">密码</label>
+            <input id="adminPassword" type="password" placeholder="管理员密码" />
+          </div>
+          <div class="form-actions">
+            <button id="adminLoginBtn" class="btn primary">进入</button>
+            <span id="adminStatus" class="summary">未验证</span>
+          </div>
+        </div>
+      </section>
+
+      <div id="adminNotice" class="message is-hidden" hidden style="display: none"></div>
+
+      <div id="adminContent" class="tools-grid is-hidden" hidden style="display: none">
+        <section class="panel ai-panel">
+          <div class="panel-title">AI 配置</div>
+          <div class="manage-grid">
+            <div class="hint">
+              配置保存在浏览器本地，便于对比不同模型。
+            </div>
+            <div class="form-row">
+              <label class="label" for="aiProfileSelect">选择配置</label>
+              <select id="aiProfileSelect"></select>
+            </div>
+            <div class="form-row">
+              <label class="label" for="aiProfileName">配置名称</label>
+              <input id="aiProfileName" type="text" placeholder="例如：GPT-4o-mini" />
+            </div>
+            <div class="form-row">
+              <label class="label" for="aiBaseUrl">Base URL</label>
+              <input id="aiBaseUrl" type="text" placeholder="https://api.openai.com/v1/chat/completions" />
+            </div>
+            <div class="form-row">
+              <label class="label" for="aiModel">模型名称</label>
+              <input id="aiModel" type="text" placeholder="gpt-4o-mini" />
+            </div>
+            <div class="form-row">
+              <label class="label" for="aiKey">API Key</label>
+              <input id="aiKey" type="password" placeholder="本地保存" />
+            </div>
+            <div class="form-actions">
+              <button id="aiSaveBtn" class="btn primary">保存配置</button>
+              <button id="aiDeleteBtn" class="btn ghost">删除配置</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel manage-panel">
+          <div class="panel-title">题库管理</div>
+          <div class="manage-grid">
+            <div class="hint">
+              可在此快速新增题目，或手动在 <code>data/puzzles/</code> 添加 txt 文件。
+            </div>
+            <div class="form-row">
+              <label class="label" for="newPuzzleId">文件名</label>
+              <input id="newPuzzleId" type="text" placeholder="可留空自动生成" />
+            </div>
+          <div class="form-row">
+            <label class="label" for="newPuzzleTitle">标题（首行）</label>
+            <input id="newPuzzleTitle" type="text" placeholder="必填" />
+          </div>
+          <div class="form-row">
+            <label class="label" for="aiStyleHint">风格补充</label>
+            <input id="aiStyleHint" type="text" placeholder="可留空，如：更偏科普或偏历史" />
+          </div>
+          <div class="form-row">
+            <label class="label" for="newPuzzleBody">正文（多行）</label>
+            <textarea id="newPuzzleBody" rows="4" placeholder="可留空"></textarea>
+          </div>
+          <div class="form-actions">
+            <label class="checkbox">
+              <input id="overwriteCheck" type="checkbox" />
+              允许覆盖同名文件
+            </label>
+            <button id="generatePuzzleBtn" class="btn ghost">AI 生成正文</button>
+            <button id="savePuzzleBtn" class="btn primary">保存题目</button>
+          </div>
+          </div>
+        </section>
+
+        <section class="panel puzzle-list-panel">
+          <div class="panel-title">题目列表</div>
+          <div class="manage-grid">
+            <div class="form-actions">
+              <button id="refreshPuzzleListBtn" class="btn ghost">刷新列表</button>
+            </div>
+            <div id="puzzleList" class="puzzle-list"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>
