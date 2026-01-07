@@ -24,6 +24,10 @@ from .db import (
     delete_ai_profile,
     set_active_ai_profile,
     get_active_ai_config,
+    set_setting,
+    get_setting,
+    clear_setting,
+    list_users,
 )
 from .puzzles import PUZZLE_DIR, load_puzzles
 
@@ -355,6 +359,10 @@ def _is_admin_token(token: str) -> bool:
     return token == password
 
 
+def _get_ai_access_code() -> str:
+    return get_setting("ai_access_code") or ""
+
+
 init_db()
 SESSION_MANAGER = SessionManager(SESSION_FILE)
 
@@ -427,6 +435,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def _require_ai_access(self) -> bool:
+        access_code = _get_ai_access_code()
+        if not access_code:
+            self._send_json({"ok": False, "message": "AI 访问码未配置，请联系管理员。"}, status_code=403)
+            return False
+        provided = self.headers.get("X-AI-Access-Code", "").strip()
+        if not provided or provided != access_code:
+            self._send_json({"ok": False, "message": "AI 访问码无效。"}, status_code=403)
+            return False
+        return True
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -488,6 +507,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             profiles = list_ai_profiles(include_secret=True)
             return self._send_json({"ok": True, "profiles": profiles})
 
+        if path == "/api/admin/ai/access":
+            if not self._require_admin():
+                return None
+            access_code = _get_ai_access_code()
+            if not access_code:
+                return self._send_json({"ok": True, "configured": False})
+            return self._send_json({"ok": True, "configured": True, "length": len(access_code)})
+
         if path == "/api/admin/puzzles":
             if not self._require_admin():
                 return None
@@ -503,14 +530,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             return self._send_json({"ok": True, "puzzles": data})
 
+        if path == "/api/admin/users":
+            if not self._require_admin():
+                return None
+            limit_raw = (query.get("limit") or ["100"])[0]
+            try:
+                limit = max(1, min(500, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 100
+            users = list_users(limit=limit)
+            return self._send_json({"ok": True, "users": users})
+
         if path == "/api/ai/config":
             config = get_active_ai_config()
+            access_configured = bool(_get_ai_access_code())
             if not config:
-                return self._send_json({"ok": True, "configured": False})
+                return self._send_json(
+                    {"ok": True, "configured": False, "access_configured": access_configured}
+                )
             return self._send_json(
                 {
                     "ok": True,
                     "configured": True,
+                    "access_configured": access_configured,
                     "name": config.get("name", ""),
                     "base_url": config.get("base_url", ""),
                     "model": config.get("model", ""),
@@ -564,6 +606,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/ai/step":
             user = self._require_user()
             if not user:
+                return None
+            if not self._require_ai_access():
                 return None
             try:
                 store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
@@ -627,6 +671,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             if len(title) > 40:
                 return self._send_json({"ok": False, "message": "标题长度过长。"}, status_code=400)
             try:
+                access_code = _get_ai_access_code()
+                if not access_code:
+                    raise RuntimeError("AI 访问码未配置，请先设置。")
                 ai_config = get_active_ai_config()
                 if not ai_config:
                     raise RuntimeError("AI 尚未配置，请在管理员页面设置。")
@@ -666,6 +713,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
 
+        if self.path == "/api/admin/ai/access":
+            if not self._require_admin():
+                return None
+            access_code = str(payload.get("access_code", "")).strip()
+            if not access_code:
+                return self._send_json({"ok": False, "message": "访问码不能为空。"}, status_code=400)
+            if len(access_code) > 64:
+                return self._send_json({"ok": False, "message": "访问码过长。"}, status_code=400)
+            try:
+                set_setting("ai_access_code", access_code)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
         return self._send_json({"ok": False, "message": "未找到对应的接口。"}, status_code=404)
 
     def do_DELETE(self) -> None:
@@ -690,6 +751,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": True})
             except Exception as exc:
                 return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/ai/access":
+            if not self._require_admin():
+                return None
+            clear_setting("ai_access_code")
+            return self._send_json({"ok": True})
 
         if self.path == "/api/admin/ai/profiles":
             if not self._require_admin():

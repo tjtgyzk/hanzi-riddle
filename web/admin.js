@@ -14,6 +14,10 @@ const aiModel = document.getElementById("aiModel");
 const aiKey = document.getElementById("aiKey");
 const aiSaveBtn = document.getElementById("aiSaveBtn");
 const aiDeleteBtn = document.getElementById("aiDeleteBtn");
+const aiAccessCode = document.getElementById("aiAccessCode");
+const aiAccessSaveBtn = document.getElementById("aiAccessSaveBtn");
+const aiAccessClearBtn = document.getElementById("aiAccessClearBtn");
+const aiAccessStatus = document.getElementById("aiAccessStatus");
 const newPuzzleId = document.getElementById("newPuzzleId");
 const newPuzzleTitle = document.getElementById("newPuzzleTitle");
 const aiStyleHint = document.getElementById("aiStyleHint");
@@ -23,6 +27,8 @@ const generatePuzzleBtn = document.getElementById("generatePuzzleBtn");
 const savePuzzleBtn = document.getElementById("savePuzzleBtn");
 const refreshPuzzleListBtn = document.getElementById("refreshPuzzleListBtn");
 const puzzleList = document.getElementById("puzzleList");
+const refreshUserListBtn = document.getElementById("refreshUserListBtn");
+const userList = document.getElementById("userList");
 
 let adminToken = "";
 
@@ -141,11 +147,26 @@ async function handleAdminLogin() {
 
 let profilesCache = [];
 let puzzlesCache = [];
+let aiAccessConfigured = false;
+let usersCache = [];
 
 async function fetchAiProfiles() {
   const data = await requestJson("/api/admin/ai/profiles");
   profilesCache = data.profiles || [];
   return profilesCache;
+}
+
+async function fetchAiAccessStatus() {
+  const data = await requestJson("/api/admin/ai/access");
+  aiAccessConfigured = Boolean(data.configured);
+  return aiAccessConfigured;
+}
+
+function renderAiAccessStatus() {
+  if (!aiAccessStatus) {
+    return;
+  }
+  aiAccessStatus.textContent = aiAccessConfigured ? "已设置" : "未设置";
 }
 
 function renderAiProfiles() {
@@ -274,6 +295,9 @@ async function fetchPuzzleList() {
 }
 
 function renderPuzzleList() {
+  if (!puzzleList) {
+    return;
+  }
   puzzleList.innerHTML = "";
   if (!puzzlesCache.length) {
     const empty = document.createElement("div");
@@ -338,6 +362,65 @@ function renderPuzzleList() {
   });
 }
 
+function formatTimestamp(raw) {
+  if (!raw) {
+    return "";
+  }
+  const parsed = Date.parse(raw);
+  if (!Number.isNaN(parsed)) {
+    const ts = parsed + 8 * 60 * 60 * 1000;
+    const date = new Date(ts);
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(date.getUTCDate()).padStart(2, "0");
+    const hours = String(date.getUTCHours()).padStart(2, "0");
+    const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+  }
+  return String(raw).replace("T", " ").replace("Z", "");
+}
+
+async function fetchUserList() {
+  const data = await requestJson("/api/admin/users");
+  usersCache = data.users || [];
+  return usersCache;
+}
+
+function renderUserList() {
+  if (!userList) {
+    return;
+  }
+  userList.innerHTML = "";
+  if (!usersCache.length) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "暂无用户";
+    userList.appendChild(empty);
+    return;
+  }
+  usersCache.forEach((user) => {
+    const item = document.createElement("div");
+    item.className = "user-item";
+    const header = document.createElement("div");
+    header.className = "user-header";
+    const name = document.createElement("div");
+    name.className = "user-name";
+    name.textContent = user.nickname || "(未命名)";
+    const meta = document.createElement("div");
+    meta.className = "user-meta";
+    meta.textContent = `ID: ${user.id}`;
+    header.append(name, meta);
+    const lastSeen = document.createElement("div");
+    lastSeen.className = "user-time";
+    lastSeen.textContent = `最后登录：${formatTimestamp(user.last_seen) || "未知"}`;
+    const createdAt = document.createElement("div");
+    createdAt.className = "user-time";
+    createdAt.textContent = `创建时间：${formatTimestamp(user.created_at) || "未知"}`;
+    item.append(header, lastSeen, createdAt);
+    userList.appendChild(item);
+  });
+}
+
 async function generatePuzzleBody() {
   const title = newPuzzleTitle.value.trim();
   const styleHint = aiStyleHint.value.trim();
@@ -393,6 +476,40 @@ aiDeleteBtn.addEventListener("click", () => {
   deleteAiProfile();
 });
 
+aiAccessSaveBtn.addEventListener("click", async () => {
+  const code = aiAccessCode.value.trim();
+  if (!code) {
+    setAdminNotice("访问码不能为空。", "bad");
+    return;
+  }
+  try {
+    await requestJson("/api/admin/ai/access", {
+      method: "POST",
+      body: JSON.stringify({ access_code: code }),
+    });
+    aiAccessCode.value = "";
+    await fetchAiAccessStatus();
+    renderAiAccessStatus();
+    setAdminNotice("AI 访问码已保存。", "good");
+  } catch (error) {
+    setAdminNotice(`保存失败：${error.message}`, "bad");
+  }
+});
+
+aiAccessClearBtn.addEventListener("click", async () => {
+  try {
+    await requestJson("/api/admin/ai/access", {
+      method: "DELETE",
+      body: JSON.stringify({}),
+    });
+    await fetchAiAccessStatus();
+    renderAiAccessStatus();
+    setAdminNotice("AI 访问码已清除。", "good");
+  } catch (error) {
+    setAdminNotice(`清除失败：${error.message}`, "bad");
+  }
+});
+
 savePuzzleBtn.addEventListener("click", () => {
   createPuzzle();
 });
@@ -401,10 +518,19 @@ generatePuzzleBtn.addEventListener("click", () => {
   generatePuzzleBody();
 });
 
-refreshPuzzleListBtn.addEventListener("click", async () => {
-  await fetchPuzzleList();
-  renderPuzzleList();
-});
+if (refreshPuzzleListBtn) {
+  refreshPuzzleListBtn.addEventListener("click", async () => {
+    await fetchPuzzleList();
+    renderPuzzleList();
+  });
+}
+
+if (refreshUserListBtn) {
+  refreshUserListBtn.addEventListener("click", async () => {
+    await fetchUserList();
+    renderUserList();
+  });
+}
 
 async function initAdmin() {
   const token = getAdminToken();
@@ -423,8 +549,12 @@ async function initAdmin() {
   unlockAdmin();
   await fetchAiProfiles();
   renderAiProfiles();
+  await fetchAiAccessStatus();
+  renderAiAccessStatus();
   await fetchPuzzleList();
   renderPuzzleList();
+  await fetchUserList();
+  renderUserList();
 }
 
 initAdmin();

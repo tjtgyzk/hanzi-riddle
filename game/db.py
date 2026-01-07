@@ -69,6 +69,15 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def upsert_user(nickname: str) -> Dict[str, object]:
@@ -275,3 +284,55 @@ def get_active_ai_config() -> Optional[Dict[str, str]]:
             "model": row["model"],
             "api_key": row["api_key"],
         }
+
+
+def list_users(limit: int = 100) -> List[Dict[str, object]]:
+    """获取用户列表（按最近活跃排序）。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, nickname, created_at, last_seen
+            FROM users
+            ORDER BY last_seen DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "nickname": row["nickname"],
+                "created_at": row["created_at"],
+                "last_seen": row["last_seen"],
+            }
+            for row in rows
+        ]
+
+
+def set_setting(key: str, value: str) -> None:
+    """设置全局配置项。"""
+    now = _now_iso()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+
+
+def get_setting(key: str) -> Optional[str]:
+    """获取全局配置项。"""
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        return str(row["value"])
+
+
+def clear_setting(key: str) -> None:
+    """删除全局配置项。"""
+    with _connect() as conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (key,))

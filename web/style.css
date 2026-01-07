@@ -721,6 +721,42 @@ input {
   max-height: none;
 }
 
+.user-list {
+  display: grid;
+  gap: 12px;
+}
+
+.user-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(15, 24, 32, 0.08);
+  display: grid;
+  gap: 6px;
+}
+
+.user-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+}
+
+.user-name {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.user-meta {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.user-time {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
 .btn.danger {
   background: rgba(192, 57, 43, 0.12);
   color: #c0392b;

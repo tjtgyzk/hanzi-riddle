@@ -27,6 +27,9 @@ const loginBadge = document.getElementById("loginBadge");
 const loginNotice = document.getElementById("loginNotice");
 const loginNoticeBtn = document.getElementById("loginNoticeBtn");
 const accountPanel = document.getElementById("accountPanel");
+const aiAccessInput = document.getElementById("aiAccessInput");
+const aiAccessSaveLocalBtn = document.getElementById("aiAccessSaveLocalBtn");
+const aiAccessLocalHint = document.getElementById("aiAccessLocalHint");
 
 let puzzlesCache = [];
 let currentState = null;
@@ -36,6 +39,7 @@ let currentUserInfo = null;
 let aiLogExpanded = false;
 
 const SESSION_KEY = "guess_game_session_id";
+const AI_ACCESS_KEY = "guess_ai_access_code";
 
 // 生成本地会话编号，保证多用户隔离
 function createSessionId() {
@@ -61,11 +65,30 @@ function getSessionId() {
 async function hasAiConfig() {
   try {
     const data = await requestJson("/api/ai/config");
-    return Boolean(data.configured);
+    return {
+      configured: Boolean(data.configured),
+      access_configured: Boolean(data.access_configured),
+    };
   } catch (error) {
     console.warn("[AI] 配置读取失败", error);
-    return false;
+    return { configured: false, access_configured: false };
   }
+}
+
+function getLocalAiAccessCode() {
+  return localStorage.getItem(AI_ACCESS_KEY) || "";
+}
+
+function setLocalAiAccessCode(code) {
+  localStorage.setItem(AI_ACCESS_KEY, code);
+}
+
+function renderAiAccessHint() {
+  if (!aiAccessLocalHint) {
+    return;
+  }
+  const code = getLocalAiAccessCode();
+  aiAccessLocalHint.textContent = code ? "已填写" : "未填写";
 }
 
 // 状态提示：统一处理提示文案与颜色样式
@@ -718,9 +741,11 @@ function updateAiLogVisibility() {
   aiToggleBtn.textContent = aiLogExpanded ? "收起" : "展开";
 }
 
-async function aiStep(aiConfig) {
+async function aiStep() {
+  const accessCode = getLocalAiAccessCode();
   const data = await requestJson("/api/ai/step", {
     method: "POST",
+    headers: accessCode ? { "X-AI-Access-Code": accessCode } : {},
     body: JSON.stringify({}),
   });
   if (data.done) {
@@ -766,9 +791,17 @@ async function runAiAuto() {
     setMessage("本题已完成。", "good");
     return;
   }
-  const configured = await hasAiConfig();
-  if (!configured) {
+  const configStatus = await hasAiConfig();
+  if (!configStatus.configured) {
     setMessage("请先在管理员页面配置 AI（Base URL/模型/Key）。", "bad");
+    return;
+  }
+  if (!configStatus.access_configured) {
+    setMessage("AI 访问码尚未设置，请联系管理员。", "bad");
+    return;
+  }
+  if (!getLocalAiAccessCode()) {
+    setMessage("请输入 AI 访问码后再使用 AI。", "bad");
     return;
   }
   if (aiRunning) {
@@ -836,6 +869,23 @@ if (loginNoticeBtn) {
   });
 }
 
+if (aiAccessSaveLocalBtn) {
+  aiAccessSaveLocalBtn.addEventListener("click", () => {
+    if (!aiAccessInput) {
+      return;
+    }
+    const code = aiAccessInput.value.trim();
+    if (!code) {
+      setMessage("AI 访问码不能为空。", "bad");
+      return;
+    }
+    setLocalAiAccessCode(code);
+    aiAccessInput.value = "";
+    renderAiAccessHint();
+    setMessage("AI 访问码已保存。", "good");
+  });
+}
+
 guessBtn.addEventListener("click", () => {
   submitGuess();
 });
@@ -884,3 +934,4 @@ puzzleSelect.addEventListener("change", () => {
 applyLoginState(null);
 loadPuzzles().then(() => loadCurrentUser());
 updateAiLogVisibility();
+renderAiAccessHint();
