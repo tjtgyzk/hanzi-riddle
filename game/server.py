@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import time
+import hashlib
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -19,6 +21,8 @@ from .db import (
     get_user_id_by_session,
     record_result,
     get_leaderboard,
+    get_leaderboard_between,
+    get_completion_count_between,
     list_ai_profiles,
     upsert_ai_profile,
     delete_ai_profile,
@@ -28,6 +32,26 @@ from .db import (
     get_setting,
     clear_setting,
     list_users,
+    get_puzzle_author_id,
+    list_puzzle_ids_by_author,
+    touch_puzzle_meta,
+    delete_puzzle_meta,
+    list_author_stats,
+    record_puzzle_attempt,
+    record_puzzle_guess,
+    set_admin_difficulty,
+    list_puzzle_admin_difficulties,
+    set_daily_flag,
+    list_daily_puzzle_ids,
+    list_played_puzzle_ids,
+    upsert_difficulty_vote,
+    get_difficulty_vote,
+    has_result,
+    list_puzzle_difficulty_stats,
+    list_overall_leaderboard,
+    claim_daily_checkin,
+    get_daily_checkin,
+    consume_daily_hint,
 )
 from .puzzles import PUZZLE_DIR, load_puzzles
 
@@ -191,6 +215,15 @@ class GameStore:
             "reason": last_reason,
             "result": {"status": last_result.status, "reason": last_result.reason, "state": last_result.state},
         }
+
+    def use_hint(self, free: bool = False) -> dict:
+        """揭示一个标题字符并返回结果。"""
+        if self.current_id is None:
+            raise RuntimeError("当前没有进行中的游戏，请先开始游戏。")
+        game = self.games.get(self.current_id)
+        if game is None:
+            raise RuntimeError("当前游戏状态已丢失，请重新开始。")
+        return game.reveal_hint(free=free)
 
     def to_persist_dict(self) -> dict:
         """导出当前会话的持久化数据。"""
@@ -363,6 +396,122 @@ def _get_ai_access_code() -> str:
     return get_setting("ai_access_code") or ""
 
 
+def _is_default_admin_user(user: Optional[Dict[str, object]]) -> bool:
+    if not isinstance(user, dict):
+        return False
+    return str(user.get("nickname", "")) == "Admin"
+
+
+def _today_local_str() -> str:
+    now = datetime.utcnow() + timedelta(hours=8)
+    return now.strftime("%Y-%m-%d")
+
+
+def _pick_daily_puzzle_id(puzzles: List[dict], date_str: str) -> str:
+    if not puzzles:
+        raise ValueError("题库为空，无法生成每日挑战。")
+    seed = int(hashlib.md5(date_str.encode("utf-8")).hexdigest(), 16)
+    index = seed % len(puzzles)
+    return puzzles[index]["id"]
+
+
+def _load_daily_history() -> List[Dict[str, str]]:
+    raw = get_setting("daily_puzzle_history") or "[]"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    history = []
+    for item in data:
+        if isinstance(item, dict):
+            puzzle_id = str(item.get("puzzle_id", "")).strip()
+            date_str = str(item.get("date", "")).strip()
+            if puzzle_id:
+                history.append({"puzzle_id": puzzle_id, "date": date_str})
+        else:
+            puzzle_id = str(item).strip()
+            if puzzle_id:
+                history.append({"puzzle_id": puzzle_id, "date": ""})
+    return history
+
+
+def _save_daily_history(history: List[Dict[str, str]]) -> None:
+    set_setting("daily_puzzle_history", json.dumps(history, ensure_ascii=False))
+
+
+def _daily_pool_ids(puzzles: List[dict]) -> List[str]:
+    puzzle_ids = [puzzle["id"] for puzzle in puzzles if puzzle.get("id")]
+    daily_ids = set(list_daily_puzzle_ids())
+    pool = set(daily_ids) if daily_ids else set(puzzle_ids)
+    if get_setting("daily_auto_unplayed") == "1":
+        played = set(list_played_puzzle_ids())
+        unplayed = {pid for pid in puzzle_ids if pid not in played}
+        pool |= unplayed
+    return [pid for pid in puzzle_ids if pid in pool]
+
+
+def _demote_daily_if_played(puzzle_id: str) -> None:
+    if not puzzle_id:
+        return
+    daily_ids = set(list_daily_puzzle_ids())
+    if puzzle_id in daily_ids:
+        set_daily_flag(puzzle_id, False)
+
+
+def _get_daily_puzzle_id(puzzles: List[dict]) -> Dict[str, str]:
+    date_str = _today_local_str()
+    stored_date = get_setting("daily_puzzle_date")
+    stored_id = get_setting("daily_puzzle_id")
+    puzzle_ids = {puzzle.get("id") for puzzle in puzzles if puzzle.get("id")}
+    if stored_date == date_str and stored_id:
+        if stored_id in puzzle_ids:
+            return {"date": date_str, "puzzle_id": stored_id}
+
+    pool_ids = _daily_pool_ids(puzzles)
+    if not pool_ids:
+        raise ValueError("每日题库为空，请管理员补充每日题。")
+
+    history = _load_daily_history()
+    used_ids = {item.get("puzzle_id") for item in history if item.get("puzzle_id")}
+    unused = [pid for pid in pool_ids if pid not in used_ids]
+    if not unused:
+        raise ValueError("每日题已用尽，请管理员补充每日题。")
+    seed = int(hashlib.md5(date_str.encode("utf-8")).hexdigest(), 16)
+    puzzle_id = unused[seed % len(unused)]
+    history = [item for item in history if item.get("date") != date_str]
+    history.append({"date": date_str, "puzzle_id": puzzle_id})
+    _save_daily_history(history)
+    if puzzle_id in set(list_daily_puzzle_ids()):
+        set_daily_flag(puzzle_id, False)
+    set_setting("daily_puzzle_date", date_str)
+    set_setting("daily_puzzle_id", puzzle_id)
+    return {"date": date_str, "puzzle_id": puzzle_id}
+
+
+def _local_day_range_utc(date_str: str) -> Dict[str, str]:
+    local_date = datetime.strptime(date_str, "%Y-%m-%d")
+    start_local = datetime(local_date.year, local_date.month, local_date.day)
+    start_utc = start_local - timedelta(hours=8)
+    end_utc = start_utc + timedelta(days=1)
+    return {
+        "start": start_utc.isoformat(timespec="seconds") + "Z",
+        "end": end_utc.isoformat(timespec="seconds") + "Z",
+    }
+
+
+def _daily_history_map() -> Dict[str, str]:
+    history = _load_daily_history()
+    mapping = {}
+    for item in history:
+        date_str = item.get("date", "")
+        puzzle_id = item.get("puzzle_id", "")
+        if date_str and puzzle_id:
+            mapping[date_str] = puzzle_id
+    return mapping
+
+
 init_db()
 SESSION_MANAGER = SessionManager(SESSION_FILE)
 
@@ -435,6 +584,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def _require_admin_user(self) -> Optional[Dict[str, object]]:
+        session_id = self._require_session_id()
+        if not session_id:
+            return None
+        user = get_user_by_session(session_id)
+        if not user:
+            self._send_json({"ok": False, "message": "请先在游戏页面登录昵称。"}, status_code=401)
+            return None
+        return user
+
     def _require_ai_access(self) -> bool:
         access_code = _get_ai_access_code()
         if not access_code:
@@ -493,6 +652,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             user = get_user_by_session(session_id)
             return self._send_json({"ok": True, "user": user})
 
+        if path == "/api/checkin":
+            user = self._require_user()
+            if not user:
+                return None
+            date_str = _today_local_str()
+            info = get_daily_checkin(int(user["id"]), date_str)
+            if not info:
+                return self._send_json({"ok": True, "date": date_str, "claimed": False, "free_hints": 0})
+            return self._send_json(
+                {
+                    "ok": True,
+                    "date": date_str,
+                    "claimed": True,
+                    "free_hints": info.get("free_hints", 0),
+                }
+            )
+
         if path == "/api/admin/check":
             if not _get_admin_password():
                 return self._send_json({"ok": False, "message": "管理员密码未设置。"}, status_code=401)
@@ -513,19 +689,43 @@ class RequestHandler(BaseHTTPRequestHandler):
             access_code = _get_ai_access_code()
             if not access_code:
                 return self._send_json({"ok": True, "configured": False})
-            return self._send_json({"ok": True, "configured": True, "length": len(access_code)})
+            return self._send_json(
+                {"ok": True, "configured": True, "length": len(access_code), "access_code": access_code}
+            )
 
         if path == "/api/admin/puzzles":
             if not self._require_admin():
                 return None
+            user = self._require_admin_user()
+            if not user:
+                return None
+            owned_ids = set(list_puzzle_ids_by_author(int(user["id"])))
+            admin_difficulties = list_puzzle_admin_difficulties()
+            daily_pool = set(list_daily_puzzle_ids())
+            played_ids = set(list_played_puzzle_ids())
+            demote_ids = daily_pool & played_ids
+            if demote_ids:
+                for puzzle_id in demote_ids:
+                    set_daily_flag(puzzle_id, False)
+                daily_pool -= demote_ids
             puzzles = load_puzzles(PUZZLE_DIR)
             data = []
             for puzzle in puzzles:
+                puzzle_id = puzzle.get("id")
+                if puzzle_id not in owned_ids:
+                    if not _is_default_admin_user(user):
+                        continue
+                    author_id = get_puzzle_author_id(str(puzzle_id))
+                    if author_id is not None:
+                        continue
                 data.append(
                     {
-                        "id": puzzle.get("id"),
+                        "id": puzzle_id,
                         "title": puzzle.get("title", ""),
                         "body": puzzle.get("body", ""),
+                        "admin_difficulty": admin_difficulties.get(str(puzzle_id), ""),
+                        "is_daily": puzzle_id in daily_pool,
+                        "is_played": puzzle_id in played_ids,
                     }
                 )
             return self._send_json({"ok": True, "puzzles": data})
@@ -540,6 +740,23 @@ class RequestHandler(BaseHTTPRequestHandler):
                 limit = 100
             users = list_users(limit=limit)
             return self._send_json({"ok": True, "users": users})
+
+        if path == "/api/admin/daily/auto":
+            if not self._require_admin():
+                return None
+            enabled = get_setting("daily_auto_unplayed") == "1"
+            return self._send_json({"ok": True, "enabled": enabled})
+
+        if path == "/api/admin/author_stats":
+            if not self._require_admin():
+                return None
+            limit_raw = (query.get("limit") or ["50"])[0]
+            try:
+                limit = max(1, min(200, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 50
+            stats = list_author_stats(limit=limit)
+            return self._send_json({"ok": True, "stats": stats})
 
         if path == "/api/ai/config":
             config = get_active_ai_config()
@@ -559,11 +776,146 @@ class RequestHandler(BaseHTTPRequestHandler):
                 }
             )
 
+        if path == "/api/daily":
+            try:
+                puzzles = load_puzzles(PUZZLE_DIR)
+                daily = _get_daily_puzzle_id(puzzles)
+                index_map = {puzzle["id"]: idx for idx, puzzle in enumerate(puzzles, start=1)}
+                created_map = {puzzle["id"]: puzzle.get("created_at", "") for puzzle in puzzles}
+                puzzle_id = daily["puzzle_id"]
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "date": daily["date"],
+                        "puzzle_id": puzzle_id,
+                        "index": index_map.get(puzzle_id),
+                        "created_at": created_map.get(puzzle_id, ""),
+                    }
+                )
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if path == "/api/daily/leaderboard":
+            limit_raw = (query.get("limit") or ["5"])[0]
+            try:
+                limit = max(1, min(50, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 5
+            try:
+                puzzles = load_puzzles(PUZZLE_DIR)
+                daily = _get_daily_puzzle_id(puzzles)
+                time_range = _local_day_range_utc(daily["date"])
+                entries = get_leaderboard_between(
+                    daily["puzzle_id"], time_range["start"], time_range["end"], limit=limit
+                )
+                count = get_completion_count_between(
+                    daily["puzzle_id"], time_range["start"], time_range["end"]
+                )
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "date": daily["date"],
+                        "puzzle_id": daily["puzzle_id"],
+                        "entries": entries,
+                        "count": count,
+                    }
+                )
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if path == "/api/daily/trend":
+            days_raw = (query.get("days") or ["7"])[0]
+            try:
+                days = max(1, min(14, int(days_raw)))
+            except (TypeError, ValueError):
+                days = 7
+            try:
+                puzzles = load_puzzles(PUZZLE_DIR)
+                daily = _get_daily_puzzle_id(puzzles)
+                history_map = _daily_history_map()
+                today = datetime.strptime(daily["date"], "%Y-%m-%d")
+                output = []
+                for offset in range(days - 1, -1, -1):
+                    day = today - timedelta(days=offset)
+                    day_str = day.strftime("%Y-%m-%d")
+                    puzzle_id = history_map.get(day_str)
+                    if day_str == daily["date"]:
+                        puzzle_id = daily["puzzle_id"]
+                    if puzzle_id:
+                        time_range = _local_day_range_utc(day_str)
+                        count = get_completion_count_between(
+                            puzzle_id, time_range["start"], time_range["end"]
+                        )
+                    else:
+                        count = 0
+                    output.append({"date": day_str, "puzzle_id": puzzle_id or "", "count": count})
+                return self._send_json({"ok": True, "items": output})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if path == "/api/difficulty/board":
+            limit_raw = (query.get("limit") or ["50"])[0]
+            try:
+                limit = max(1, min(200, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 50
+            try:
+                puzzles = load_puzzles(PUZZLE_DIR)
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+            index_map = {puzzle["id"]: idx for idx, puzzle in enumerate(puzzles, start=1)}
+            created_map = {puzzle["id"]: puzzle.get("created_at", "") for puzzle in puzzles}
+            stats = list_puzzle_difficulty_stats(limit=limit)
+            data = []
+            for stat in stats:
+                puzzle_id = stat.get("puzzle_id")
+                data.append(
+                    {
+                        **stat,
+                        "index": index_map.get(puzzle_id),
+                        "created_at": created_map.get(puzzle_id, ""),
+                    }
+                )
+            return self._send_json({"ok": True, "stats": data})
+
+        if path == "/api/difficulty/mine":
+            user = self._require_user()
+            if not user:
+                return None
+            puzzle_id = _validate_puzzle_id((query.get("puzzle_id") or [""])[0])
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "缺少 puzzle_id。"}, status_code=400)
+            vote = get_difficulty_vote(int(user["id"]), puzzle_id)
+            return self._send_json({"ok": True, "difficulty": vote})
+
+        if path == "/api/overall_leaderboard":
+            limit_raw = (query.get("limit") or ["50"])[0]
+            try:
+                limit = max(1, min(200, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 50
+            stats = list_overall_leaderboard(limit=limit)
+            return self._send_json({"ok": True, "stats": stats})
+
+        if path == "/api/author_stats":
+            limit_raw = (query.get("limit") or ["50"])[0]
+            try:
+                limit = max(1, min(200, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 50
+            stats = list_author_stats(limit=limit)
+            return self._send_json({"ok": True, "stats": stats})
+
         if path == "/api/leaderboard":
             puzzle_id = (query.get("puzzle_id") or [""])[0]
             if not puzzle_id:
                 return self._send_json({"ok": False, "message": "缺少 puzzle_id。"}, status_code=400)
-            entries = get_leaderboard(puzzle_id, limit=10)
+            limit_raw = (query.get("limit") or ["10"])[0]
+            try:
+                limit = max(1, min(50, int(limit_raw)))
+            except (TypeError, ValueError):
+                limit = 10
+            entries = get_leaderboard(puzzle_id, limit=limit)
             return self._send_json({"ok": True, "entries": entries})
 
         return self._send_json({"ok": False, "message": "未找到对应的接口。"}, status_code=404)
@@ -582,7 +934,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             mode = payload.get("mode", "resume")
             try:
                 store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                existed = bool(puzzle_id and puzzle_id in store.games)
                 state = store.start(puzzle_id, mode)
+                if mode == "restart" or not existed:
+                    record_puzzle_attempt(int(user["id"]), str(state["puzzle_id"]))
+                    _demote_daily_if_played(str(state["puzzle_id"]))
                 SESSION_MANAGER.save()
                 return self._send_json({"ok": True, "state": state})
             except Exception as exc:
@@ -596,10 +952,59 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
                 result = store.guess(guess_char)
+                if result.get("state"):
+                    record_puzzle_guess(
+                        int(user["id"]),
+                        str(result["state"]["puzzle_id"]),
+                        str(result.get("status", "")),
+                    )
                 if result["state"].get("is_complete"):
                     record_result(user["id"], result["state"]["puzzle_id"], result["state"]["guess_count"])
                 SESSION_MANAGER.save()
                 return self._send_json({"ok": True, "result": result})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/hint":
+            user = self._require_user()
+            if not user:
+                return None
+            try:
+                date_str = _today_local_str()
+                free_used = consume_daily_hint(int(user["id"]), date_str)
+                store = SESSION_MANAGER.get_store_for_user(int(user["id"]))
+                result = store.use_hint(free=free_used)
+                state = result.get("state")
+                if state and state.get("is_complete"):
+                    record_result(user["id"], state["puzzle_id"], state["guess_count"])
+                SESSION_MANAGER.save()
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "revealed": result.get("revealed"),
+                        "penalty": result.get("penalty", 0),
+                        "free_used": free_used,
+                        "state": state,
+                    }
+                )
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/checkin":
+            user = self._require_user()
+            if not user:
+                return None
+            date_str = _today_local_str()
+            try:
+                info = claim_daily_checkin(int(user["id"]), date_str, reward=1)
+                return self._send_json(
+                    {
+                        "ok": True,
+                        "date": date_str,
+                        "claimed": True,
+                        "free_hints": info.get("free_hints", 0),
+                    }
+                )
             except Exception as exc:
                 return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
 
@@ -619,6 +1024,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     state = result["result"]["state"]
                     record_result(user["id"], state["puzzle_id"], state["guess_count"])
                 status = result.get("result", {}).get("status")
+                state = result.get("result", {}).get("state")
+                if state and status:
+                    record_puzzle_guess(int(user["id"]), str(state["puzzle_id"]), str(status))
                 guess = result.get("guess")
                 reason = result.get("reason")
                 print(f"[AI] 猜测={guess} 状态={status} 理由={reason}")
@@ -648,16 +1056,135 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/puzzles/create":
             if not self._require_admin():
                 return None
+            user = self._require_admin_user()
+            if not user:
+                return None
             try:
                 puzzle_id = payload.get("puzzle_id")
                 title = payload.get("title", "")
                 body = payload.get("body", "")
                 overwrite = bool(payload.get("overwrite", False))
+                safe_id = _sanitize_puzzle_id(str(puzzle_id or ""))
+                if safe_id:
+                    author_id = get_puzzle_author_id(safe_id)
+                    if author_id and author_id != int(user["id"]):
+                        return self._send_json(
+                            {"ok": False, "message": "只能编辑自己创建的题目。"},
+                            status_code=403,
+                        )
+                    if author_id is None and not _is_default_admin_user(user):
+                        file_path = PUZZLE_DIR / f"{safe_id}.txt"
+                        if file_path.exists():
+                            return self._send_json(
+                                {"ok": False, "message": "该题目未归属，只能由 Admin 认领或修改。"},
+                                status_code=403,
+                            )
                 puzzle = _create_puzzle_file(puzzle_id, title, body, overwrite)
                 if overwrite and puzzle.get("overwrote"):
                     SESSION_MANAGER.remove_puzzle(puzzle["id"])
                 SESSION_MANAGER.save()
+                touch_puzzle_meta(puzzle["id"], int(user["id"]))
                 return self._send_json({"ok": True, "puzzle": {"id": puzzle["id"]}})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/difficulty/vote":
+            user = self._require_user()
+            if not user:
+                return None
+            puzzle_id = _validate_puzzle_id(str(payload.get("puzzle_id", "")))
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "题目 id 不合法。"}, status_code=400)
+            difficulty_raw = str(payload.get("difficulty", "")).strip().lower()
+            mapping = {"easy": 1, "medium": 2, "hard": 3, "1": 1, "2": 2, "3": 3}
+            if difficulty_raw not in mapping:
+                return self._send_json({"ok": False, "message": "难度参数不合法。"}, status_code=400)
+            if not has_result(int(user["id"]), puzzle_id):
+                return self._send_json({"ok": False, "message": "通关后才能评价难度。"}, status_code=403)
+            try:
+                upsert_difficulty_vote(int(user["id"]), puzzle_id, mapping[difficulty_raw])
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/puzzles/difficulty":
+            if not self._require_admin():
+                return None
+            user = self._require_admin_user()
+            if not user:
+                return None
+            puzzle_id = _validate_puzzle_id(str(payload.get("puzzle_id", "")))
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "题目 id 不合法。"}, status_code=400)
+            difficulty_raw = str(payload.get("difficulty", "")).strip().lower()
+            allowed = {"", "easy", "medium", "hard"}
+            if difficulty_raw not in allowed:
+                return self._send_json({"ok": False, "message": "难度参数不合法。"}, status_code=400)
+            author_id = get_puzzle_author_id(puzzle_id)
+            if author_id and author_id != int(user["id"]):
+                return self._send_json(
+                    {"ok": False, "message": "只能为自己创建的题目标注难度。"},
+                    status_code=403,
+                )
+            if author_id is None and not _is_default_admin_user(user):
+                return self._send_json(
+                    {"ok": False, "message": "该题目未归属，只能由 Admin 标注难度。"},
+                    status_code=403,
+                )
+            try:
+                if author_id is None:
+                    touch_puzzle_meta(puzzle_id, int(user["id"]))
+                value = difficulty_raw or None
+                set_admin_difficulty(puzzle_id, value)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/puzzles/daily":
+            if not self._require_admin():
+                return None
+            user = self._require_admin_user()
+            if not user:
+                return None
+            puzzle_id = _validate_puzzle_id(str(payload.get("puzzle_id", "")))
+            if not puzzle_id:
+                return self._send_json({"ok": False, "message": "题目 id 不合法。"}, status_code=400)
+            is_daily = bool(payload.get("is_daily", False))
+            author_id = get_puzzle_author_id(puzzle_id)
+            if author_id and author_id != int(user["id"]):
+                return self._send_json(
+                    {"ok": False, "message": "只能为自己创建的题目标记每日题。"},
+                    status_code=403,
+                )
+            if author_id is None and not _is_default_admin_user(user):
+                return self._send_json(
+                    {"ok": False, "message": "该题目未归属，只能由 Admin 标记每日题。"},
+                    status_code=403,
+                )
+            try:
+                if is_daily:
+                    played_ids = set(list_played_puzzle_ids())
+                    if puzzle_id in played_ids:
+                        current_daily = set(list_daily_puzzle_ids())
+                        if puzzle_id not in current_daily:
+                            return self._send_json(
+                                {"ok": False, "message": "该题已被游玩，不能加入每日题池。"},
+                                status_code=400,
+                            )
+                if author_id is None:
+                    touch_puzzle_meta(puzzle_id, int(user["id"]))
+                set_daily_flag(puzzle_id, is_daily)
+                return self._send_json({"ok": True})
+            except Exception as exc:
+                return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
+
+        if self.path == "/api/admin/daily/auto":
+            if not self._require_admin():
+                return None
+            enabled = bool(payload.get("enabled", False))
+            try:
+                set_setting("daily_auto_unplayed", "1" if enabled else "0")
+                return self._send_json({"ok": True, "enabled": enabled})
             except Exception as exc:
                 return self._send_json({"ok": False, "message": str(exc)}, status_code=400)
 
@@ -738,16 +1265,31 @@ class RequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/admin/puzzles":
             if not self._require_admin():
                 return None
+            user = self._require_admin_user()
+            if not user:
+                return None
             puzzle_id = _validate_puzzle_id(str(payload.get("puzzle_id", "")))
             if not puzzle_id:
                 return self._send_json({"ok": False, "message": "题目 id 不合法。"}, status_code=400)
             try:
+                author_id = get_puzzle_author_id(puzzle_id)
+                if author_id and author_id != int(user["id"]):
+                    return self._send_json(
+                        {"ok": False, "message": "只能删除自己创建的题目。"},
+                        status_code=403,
+                    )
+                if author_id is None and not _is_default_admin_user(user):
+                    return self._send_json(
+                        {"ok": False, "message": "该题目未归属，只能由 Admin 删除。"},
+                        status_code=403,
+                    )
                 file_path = PUZZLE_DIR / f"{puzzle_id}.txt"
                 if not file_path.exists():
                     return self._send_json({"ok": False, "message": "题目不存在。"}, status_code=404)
                 file_path.unlink()
                 SESSION_MANAGER.remove_puzzle(puzzle_id)
                 SESSION_MANAGER.save()
+                delete_puzzle_meta(puzzle_id)
                 return self._send_json({"ok": True})
             except Exception as exc:
                 return self._send_json({"ok": False, "message": str(exc)}, status_code=400)

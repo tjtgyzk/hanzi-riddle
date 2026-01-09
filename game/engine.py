@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from dataclasses import dataclass
+import random
 from typing import Dict, List, Optional
 
 
@@ -62,6 +63,11 @@ class Game:
         self._guessed_correct_set = set()
         self._guessed_wrong_set = set()
 
+        # 提示次数（免费与扣分）
+        self.hints_used = 0
+        self.free_hints_used = 0
+        self.paid_hints_used = 0
+
         # 标题与全文中所有可猜字符集合
         self._title_chars = self._extract_guessable_chars(self.title)
         self._all_chars = self._extract_guessable_chars(self.title + self.body)
@@ -104,6 +110,9 @@ class Game:
             "title_remaining": len(self._title_chars - self._guessed_correct_set),
             "is_complete": complete,
             "placeholder": self.placeholder,
+            "hints_used": self.hints_used,
+            "free_hints_used": self.free_hints_used,
+            "paid_hints_used": self.paid_hints_used,
         }
 
     def export_progress(self) -> Dict[str, object]:
@@ -112,6 +121,9 @@ class Game:
             "guess_count": self.guess_count,
             "guessed_correct": list(self.guessed_correct),
             "guessed_wrong": list(self.guessed_wrong),
+            "hints_used": self.hints_used,
+            "free_hints_used": self.free_hints_used,
+            "paid_hints_used": self.paid_hints_used,
         }
 
     def apply_progress(self, data: Dict[str, object]) -> None:
@@ -132,6 +144,40 @@ class Game:
         except (TypeError, ValueError):
             guess_count = 0
         self.guess_count = max(0, guess_count)
+
+        hints_used = data.get("hints_used", 0)
+        free_hints_used = data.get("free_hints_used", 0)
+        paid_hints_used = data.get("paid_hints_used", 0)
+        for value, name in [
+            (hints_used, "hints_used"),
+            (free_hints_used, "free_hints_used"),
+            (paid_hints_used, "paid_hints_used"),
+        ]:
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                value = 0
+            setattr(self, name, max(0, value))
+
+    def reveal_hint(self, free: bool = False) -> Dict[str, object]:
+        """随机揭示一个正文字符（非标题），免费或扣分。"""
+        if self.is_complete():
+            raise RuntimeError("题目已完成，无需提示。")
+        remaining = list(self._all_chars - self._title_chars - self._guessed_correct_set)
+        if not remaining:
+            raise RuntimeError("正文可提示字符已用完，请自行猜题。")
+        revealed = random.choice(remaining)
+        self.guessed_correct.append(revealed)
+        self._guessed_correct_set.add(revealed)
+        self.hints_used += 1
+        penalty = 0
+        if free:
+            self.free_hints_used += 1
+        else:
+            penalty = 2 + self.paid_hints_used
+            self.paid_hints_used += 1
+            self.guess_count += penalty
+        return {"revealed": revealed, "penalty": penalty, "free_used": free, "state": self.get_state()}
 
     def guess(self, ch: str) -> GuessResult:
         """处理一次猜测，返回结果与最新状态。"""

@@ -18,9 +18,17 @@
         <div class="select-row">
           <label class="label" for="puzzleSelect">题目</label>
           <select id="puzzleSelect"></select>
+          <button id="filterUnfinishedBtn" class="btn ghost small toggle" type="button">只看未完成</button>
           <button id="startBtn" class="btn primary">开始 / 继续</button>
           <button id="restartBtn" class="btn ghost">重新开始</button>
           <button id="refreshBtn" class="btn ghost">刷新题库</button>
+        </div>
+        <div class="daily-row">
+          <div class="daily-info">
+            <div class="daily-title">每日挑战</div>
+            <div id="dailyHint" class="summary">加载中...</div>
+          </div>
+          <button id="dailyStartBtn" class="btn ghost">进入今日挑战</button>
         </div>
         <div id="progressSummary" class="summary">历史：未开始 0 / 进行中 0 / 已完成 0</div>
         <div class="hint">
@@ -43,6 +51,10 @@
           <div class="block paper-block">
             <div id="contentMasked" class="masked body"></div>
           </div>
+          <div class="wrong-strip">
+            <span class="meta-label">已猜错</span>
+            <span id="wrongList" class="wrong-list">无</span>
+          </div>
           </div>
 
         <div class="controls">
@@ -51,6 +63,7 @@
             <span id="loginBadge" class="login-badge">未登录</span>
           </div>
           <button id="guessBtn" class="btn primary">猜</button>
+          <button id="hintBtn" class="btn ghost">提示</button>
           <button id="aiBtn" class="btn ghost">AI 最短解</button>
         </div>
 
@@ -69,11 +82,16 @@
                 <span id="puzzleStatus" class="meta-value">未开始</span>
               </div>
             </div>
-            <div class="wrong">
-              <span class="meta-label">已猜错</span>
-              <span id="wrongList" class="meta-value">无</span>
-            </div>
           <div id="messageBox" class="message">请先选择题目开始。</div>
+          <div id="difficultyPanel" class="difficulty-panel is-hidden">
+            <span class="meta-label">难度评价</span>
+            <div class="difficulty-actions">
+              <button class="btn ghost small" data-difficulty="easy">简单</button>
+              <button class="btn ghost small" data-difficulty="medium">中等</button>
+              <button class="btn ghost small" data-difficulty="hard">困难</button>
+            </div>
+            <span id="difficultyStatus" class="summary">未评价</span>
+          </div>
           <div class="ai-trace">
             <div class="ai-trace-header">
               <span class="meta-label">AI 思路</span>
@@ -98,6 +116,11 @@
             <span id="currentUser" class="summary">当前：未登录</span>
             <a class="btn ghost" href="/admin">管理后台</a>
           </div>
+          <div class="checkin-row">
+            <span class="meta-label">签到提示卡</span>
+            <button id="checkinBtn" class="btn ghost small">今日签到</button>
+            <span id="checkinStatus" class="summary">未签到</span>
+          </div>
           <div class="form-row">
             <label class="label" for="aiAccessInput">AI 访问码</label>
             <input id="aiAccessInput" type="password" placeholder="仅用于 AI 功能" />
@@ -110,7 +133,10 @@
       </section>
 
           <section class="panel leaderboard-panel">
-            <div class="panel-title">单题排行榜</div>
+            <div class="panel-title">
+              <span class="panel-icon icon-single"></span>
+              单题排行榜
+            </div>
             <div class="manage-grid">
               <div class="form-row">
                 <label class="label" for="leaderboardSelect">选择题目</label>
@@ -120,8 +146,73 @@
               <ol id="leaderboardList" class="leaderboard-list"></ol>
             </div>
           </section>
+
+          <section class="panel board-panel daily-panel">
+            <div class="panel-title">
+              <span class="panel-icon icon-daily"></span>
+              每日挑战排行
+            </div>
+            <div class="daily-panel-head">
+              <div class="daily-panel-meta">
+                <span class="daily-badge">今日挑战专属徽章</span>
+                <span id="dailyBoardMeta" class="summary">今日完成 0 · 今日题目</span>
+              </div>
+              <button id="dailyBoardRefreshBtn" class="btn ghost small">刷新</button>
+            </div>
+            <div class="daily-trend">
+              <span class="meta-label">最近 7 天趋势</span>
+              <div id="dailyTrendBars" class="trend-bars"></div>
+            </div>
+            <div id="dailyLeaderboardEmpty" class="hint">暂无成绩</div>
+            <ol id="dailyLeaderboardList" class="leaderboard-list compact"></ol>
+          </section>
         </div>
       </div>
+
+      <section class="panel board-panel author-panel">
+        <div class="panel-title">
+          <span class="panel-icon icon-author"></span>
+          出题排行榜
+        </div>
+        <div class="author-panel-head">
+          <div class="hint">出题贡献、完成率与尝试次数。</div>
+          <button id="authorToggleBtn" class="btn ghost small">展开</button>
+        </div>
+        <div id="authorStatsWrap" class="author-stats-wrap is-collapsed">
+          <div id="authorStatsEmpty" class="hint">暂无数据</div>
+          <ol id="authorStatsList" class="leaderboard-list board-list"></ol>
+        </div>
+      </section>
+
+      <section class="panel board-panel difficulty-board-panel">
+        <div class="panel-title">
+          <span class="panel-icon icon-diff"></span>
+          题目难度榜
+        </div>
+        <div class="author-panel-head">
+          <div class="hint">基于玩家评价与通关数据。</div>
+          <button id="difficultyToggleBtn" class="btn ghost small">展开</button>
+        </div>
+        <div id="difficultyBoardWrap" class="author-stats-wrap is-collapsed">
+          <div id="difficultyBoardEmpty" class="hint">暂无数据</div>
+          <ol id="difficultyBoardList" class="leaderboard-list board-list"></ol>
+        </div>
+      </section>
+
+      <section class="panel board-panel overall-panel">
+        <div class="panel-title">
+          <span class="panel-icon icon-overall"></span>
+          玩家总榜
+        </div>
+        <div class="author-panel-head">
+          <div class="hint">平均猜测、平均用时与命中率。</div>
+          <button id="overallToggleBtn" class="btn ghost small">展开</button>
+        </div>
+        <div id="overallWrap" class="author-stats-wrap is-collapsed">
+          <div id="overallEmpty" class="hint">暂无数据</div>
+          <ol id="overallList" class="leaderboard-list board-list"></ol>
+        </div>
+      </section>
 
     </div>
 

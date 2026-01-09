@@ -36,7 +36,7 @@
           <div class="panel-title">AI 配置</div>
           <div class="manage-grid">
             <div class="hint">
-              配置保存在浏览器本地，便于对比不同模型。
+              配置保存在服务器数据库中，切换设备也能读取。
             </div>
             <div class="form-row">
               <label class="label" for="aiProfileSelect">选择配置</label>
@@ -64,7 +64,7 @@
             </div>
             <div class="form-row">
               <label class="label" for="aiAccessCode">AI 访问码</label>
-              <input id="aiAccessCode" type="password" placeholder="用于限制 AI 使用" />
+              <input id="aiAccessCode" type="text" placeholder="用于限制 AI 使用（明文显示）" />
             </div>
             <div class="form-actions">
               <button id="aiAccessSaveBtn" class="btn ghost">保存访问码</button>
@@ -110,10 +110,47 @@
         <section class="panel puzzle-list-panel">
           <div class="panel-title">题目列表</div>
           <div class="manage-grid">
+            <div class="hint">仅展示你创建的题目；未归属的题目默认归 Admin。</div>
+            <div class="daily-auto-row">
+              <label class="label" for="dailyAutoCheck">每日题池规则</label>
+              <div class="daily-auto-actions">
+                <label class="checkbox">
+                  <input id="dailyAutoCheck" type="checkbox" />
+                  自动将未被游玩的题加入每日题池
+                </label>
+                <button id="dailyAutoSaveBtn" class="btn ghost small">保存规则</button>
+                <span id="dailyAutoStatus" class="summary">未保存</span>
+              </div>
+            </div>
+            <div class="puzzle-filter-grid">
+              <div class="form-row">
+                <label class="label" for="puzzleSearchInput">搜索题目</label>
+                <input id="puzzleSearchInput" type="text" placeholder="标题 / ID / 关键词" />
+              </div>
+              <div class="form-row">
+                <label class="label" for="puzzleFilterSelect">筛选</label>
+                <select id="puzzleFilterSelect">
+                  <option value="all">全部题目</option>
+                  <option value="daily">仅每日题</option>
+                  <option value="normal">仅普通题</option>
+                  <option value="unplayed">仅未游玩</option>
+                  <option value="played">仅已游玩</option>
+                </select>
+              </div>
+            </div>
             <div class="form-actions">
               <button id="refreshPuzzleListBtn" class="btn ghost">刷新列表</button>
             </div>
-            <div id="puzzleList" class="puzzle-list"></div>
+            <div class="puzzle-group">
+              <div class="puzzle-group-title">每日题池</div>
+              <div class="puzzle-group-hint">仅展示可参与每日挑战的题目。</div>
+              <div id="dailyPuzzleList" class="puzzle-list"></div>
+            </div>
+            <div class="puzzle-group">
+              <div class="puzzle-group-title">普通题库</div>
+              <div class="puzzle-group-hint">被玩过的题目不能加入每日题池。</div>
+              <div id="normalPuzzleList" class="puzzle-list"></div>
+            </div>
           </div>
         </section>
 
@@ -124,6 +161,18 @@
               <button id="refreshUserListBtn" class="btn ghost">刷新用户</button>
             </div>
             <div id="userList" class="user-list"></div>
+          </div>
+        </section>
+
+        <section class="panel author-stats-panel">
+          <div class="panel-title">出题排行榜</div>
+          <div class="manage-grid">
+            <div class="hint">按出题数与被通关次数综合排序。</div>
+            <div class="form-actions">
+              <button id="refreshAuthorStatsBtn" class="btn ghost">刷新排行</button>
+            </div>
+            <div id="authorStatsEmpty" class="hint is-hidden">暂无数据</div>
+            <ol id="authorStatsList" class="author-stats-list"></ol>
           </div>
         </section>
       </div>

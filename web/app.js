@@ -5,6 +5,7 @@ const startBtn = document.getElementById("startBtn");
 const restartBtn = document.getElementById("restartBtn");
 const guessInput = document.getElementById("guessInput");
 const guessBtn = document.getElementById("guessBtn");
+const hintBtn = document.getElementById("hintBtn");
 const aiBtn = document.getElementById("aiBtn");
 const contentMasked = document.getElementById("contentMasked");
 const guessCount = document.getElementById("guessCount");
@@ -23,6 +24,7 @@ const currentUser = document.getElementById("currentUser");
 const leaderboardSelect = document.getElementById("leaderboardSelect");
 const leaderboardList = document.getElementById("leaderboardList");
 const leaderboardEmpty = document.getElementById("leaderboardEmpty");
+const filterUnfinishedBtn = document.getElementById("filterUnfinishedBtn");
 const loginBadge = document.getElementById("loginBadge");
 const loginNotice = document.getElementById("loginNotice");
 const loginNoticeBtn = document.getElementById("loginNoticeBtn");
@@ -30,6 +32,29 @@ const accountPanel = document.getElementById("accountPanel");
 const aiAccessInput = document.getElementById("aiAccessInput");
 const aiAccessSaveLocalBtn = document.getElementById("aiAccessSaveLocalBtn");
 const aiAccessLocalHint = document.getElementById("aiAccessLocalHint");
+const checkinBtn = document.getElementById("checkinBtn");
+const checkinStatus = document.getElementById("checkinStatus");
+const authorStatsList = document.getElementById("authorStatsList");
+const authorStatsEmpty = document.getElementById("authorStatsEmpty");
+const authorToggleBtn = document.getElementById("authorToggleBtn");
+const authorStatsWrap = document.getElementById("authorStatsWrap");
+const dailyStartBtn = document.getElementById("dailyStartBtn");
+const dailyHint = document.getElementById("dailyHint");
+const dailyBoardRefreshBtn = document.getElementById("dailyBoardRefreshBtn");
+const dailyLeaderboardList = document.getElementById("dailyLeaderboardList");
+const dailyLeaderboardEmpty = document.getElementById("dailyLeaderboardEmpty");
+const dailyTrendBars = document.getElementById("dailyTrendBars");
+const dailyBoardMeta = document.getElementById("dailyBoardMeta");
+const difficultyPanel = document.getElementById("difficultyPanel");
+const difficultyStatus = document.getElementById("difficultyStatus");
+const difficultyToggleBtn = document.getElementById("difficultyToggleBtn");
+const difficultyBoardWrap = document.getElementById("difficultyBoardWrap");
+const difficultyBoardList = document.getElementById("difficultyBoardList");
+const difficultyBoardEmpty = document.getElementById("difficultyBoardEmpty");
+const overallToggleBtn = document.getElementById("overallToggleBtn");
+const overallWrap = document.getElementById("overallWrap");
+const overallList = document.getElementById("overallList");
+const overallEmpty = document.getElementById("overallEmpty");
 
 let puzzlesCache = [];
 let currentState = null;
@@ -37,6 +62,20 @@ let aiRunning = false;
 let aiLogs = [];
 let currentUserInfo = null;
 let aiLogExpanded = false;
+let authorStatsExpanded = false;
+let authorStatsCache = [];
+let dailyPuzzleId = "";
+let dailyDate = "";
+let dailyIndex = 0;
+let dailyCompletionCount = 0;
+let filterUnfinishedOnly = false;
+let difficultyBoardExpanded = false;
+let difficultyBoardCache = [];
+let overallExpanded = false;
+let overallCache = [];
+let currentDifficulty = "";
+let lastDifficultyPuzzleId = "";
+let freeHintCount = 0;
 
 const SESSION_KEY = "guess_game_session_id";
 const AI_ACCESS_KEY = "guess_ai_access_code";
@@ -135,7 +174,10 @@ function applyLoginState(user) {
   setDisabled(restartBtn, !loggedIn);
   setDisabled(aiBtn, !loggedIn);
   setInputEnabled(currentState && !currentState.is_complete);
+  updateHintButtonState();
   if (!loggedIn) {
+    freeHintCount = 0;
+    setCheckinStatus("未登录");
     setMessage("先在右侧账号区输入昵称并点击登录，即可开始游戏。", "bad");
   }
 }
@@ -189,14 +231,19 @@ function setLeaderboardHint(text) {
   leaderboardList.innerHTML = "";
 }
 
-function renderLeaderboard(entries) {
-  leaderboardList.innerHTML = "";
-  if (!entries || !entries.length) {
-    setLeaderboardHint("暂无成绩");
+function renderLeaderboardItems(entries, listEl, emptyEl, maxItems = null) {
+  if (!listEl || !emptyEl) {
     return;
   }
-  leaderboardEmpty.style.display = "none";
-  entries.forEach((entry, index) => {
+  listEl.innerHTML = "";
+  if (!entries || !entries.length) {
+    emptyEl.textContent = "暂无成绩";
+    emptyEl.style.display = "block";
+    return;
+  }
+  emptyEl.style.display = "none";
+  const list = maxItems ? entries.slice(0, maxItems) : entries;
+  list.forEach((entry, index) => {
     const item = document.createElement("li");
     item.className = "leaderboard-item";
     if (index === 0) {
@@ -240,8 +287,12 @@ function renderLeaderboard(entries) {
     } else {
       item.append(row);
     }
-    leaderboardList.appendChild(item);
+    listEl.appendChild(item);
   });
+}
+
+function renderLeaderboard(entries) {
+  renderLeaderboardItems(entries, leaderboardList, leaderboardEmpty);
 }
 
 async function loadLeaderboard(puzzleId) {
@@ -288,6 +339,35 @@ function setInputEnabled(enabled) {
   updateGuessButtonState();
 }
 
+function updateHintButtonLabel() {
+  if (!hintBtn) {
+    return;
+  }
+  if (freeHintCount > 0) {
+    hintBtn.textContent = "提示（免费）";
+    return;
+  }
+  const paidHints = currentState ? Number(currentState.paid_hints_used) || 0 : 0;
+  const penalty = 2 + paidHints;
+  hintBtn.textContent = `提示（+${penalty}）`;
+}
+
+function updateHintButtonState() {
+  if (!hintBtn) {
+    return;
+  }
+  const allow = isLoggedIn() && currentState && !currentState.is_complete && !aiRunning;
+  hintBtn.disabled = !allow;
+  updateHintButtonLabel();
+}
+
+function setCheckinStatus(text) {
+  if (!checkinStatus) {
+    return;
+  }
+  checkinStatus.textContent = text;
+}
+
 // AI 模式下锁定部分按钮，避免冲突
 function setAiControlsEnabled(enabled) {
   setDisabled(startBtn, !enabled);
@@ -297,6 +377,7 @@ function setAiControlsEnabled(enabled) {
   setDisabled(leaderboardSelect, !enabled);
   setDisabled(loginBtn, !enabled);
   setDisabled(nicknameInput, !enabled);
+  setDisabled(hintBtn, !enabled);
 }
 
 // 简单的 HTML 转义，避免渲染时被当作标签
@@ -359,29 +440,74 @@ function updateProgressSummary() {
   progressSummary.textContent = `历史：未开始 ${counts["未开始"]} / 进行中 ${counts["进行中"]} / 已完成 ${counts["已完成"]}`;
 }
 
+function updateFilterUnfinishedState() {
+  if (!filterUnfinishedBtn) {
+    return;
+  }
+  filterUnfinishedBtn.classList.toggle("is-active", filterUnfinishedOnly);
+  filterUnfinishedBtn.setAttribute("aria-pressed", String(filterUnfinishedOnly));
+  filterUnfinishedBtn.textContent = filterUnfinishedOnly ? "只看未完成：开" : "只看未完成";
+}
+
+function getPuzzleDisplayList() {
+  let list = puzzlesCache.slice();
+  if (filterUnfinishedOnly) {
+    list = list.filter((puzzle) => (puzzle.status || "未开始") !== "已完成");
+  }
+  if (dailyPuzzleId) {
+    const dailyItem = list.find((puzzle) => puzzle.id === dailyPuzzleId);
+    if (dailyItem) {
+      return [dailyItem, ...list.filter((puzzle) => puzzle.id !== dailyPuzzleId)];
+    }
+  }
+  return list;
+}
+
 // 重新渲染题目选择列表
 function updatePuzzleOptions() {
   const currentValue = puzzleSelect.value;
   puzzleSelect.innerHTML = "";
-  puzzlesCache.forEach((puzzle, index) => {
+  const displayList = getPuzzleDisplayList();
+  displayList.forEach((puzzle, index) => {
     const option = document.createElement("option");
     option.value = puzzle.id;
     const displayIndex = puzzle.index || index + 1;
     const displayStatus = puzzle.status || "未开始";
     const createdAt = formatDateOnly(puzzle.created_at);
-    if (displayStatus === "已完成" && puzzle.title) {
-      option.textContent = `第${displayIndex}题 · ${puzzle.title}（已完成）${createdAt ? ` · ${createdAt}` : ""}`;
-    } else {
-      option.textContent = `第${displayIndex}题（${displayStatus}）${createdAt ? ` · ${createdAt}` : ""}`;
+    const isDaily = dailyPuzzleId && puzzle.id === dailyPuzzleId;
+    const tags = [];
+    if (isDaily) {
+      tags.push("今日挑战");
     }
+    if (displayStatus === "已完成") {
+      tags.push("已完成");
+    } else if (displayStatus === "进行中") {
+      tags.push("进行中");
+    }
+    if (isDaily) {
+      option.style.color = "#c8643c";
+      option.style.fontWeight = "600";
+    } else if (displayStatus === "已完成") {
+      option.style.color = "#1f7b6f";
+    } else if (displayStatus === "进行中") {
+      option.style.color = "#9a4b2d";
+    }
+    const baseTitle = displayStatus === "已完成" && puzzle.title
+      ? `第${displayIndex}题 · ${puzzle.title}`
+      : `第${displayIndex}题`;
+    const timeLabel = createdAt ? ` · ${createdAt}` : "";
+    const tagLabel = tags.length ? ` · ${tags.join(" · ")}` : "";
+    option.textContent = `${baseTitle}${timeLabel}${tagLabel}`;
     puzzleSelect.appendChild(option);
   });
-  if (currentValue) {
+  if (currentValue && displayList.find((puzzle) => puzzle.id === currentValue)) {
     puzzleSelect.value = currentValue;
   } else {
-    const currentPuzzle = puzzlesCache.find((puzzle) => puzzle.is_current);
-    if (currentPuzzle) {
-      puzzleSelect.value = currentPuzzle.id;
+    const dailyItem = displayList.find((puzzle) => puzzle.id === dailyPuzzleId);
+    const currentPuzzle = displayList.find((puzzle) => puzzle.is_current);
+    const nextPuzzle = dailyItem || currentPuzzle || displayList[0];
+    if (nextPuzzle) {
+      puzzleSelect.value = nextPuzzle.id;
     }
   }
   updateStartLabel();
@@ -424,7 +550,9 @@ function updateLeaderboardOptions() {
     option.value = puzzle.id;
     const displayIndex = puzzle.index || index + 1;
     const createdAt = formatDateOnly(puzzle.created_at);
-    option.textContent = `第${displayIndex}题${createdAt ? ` · ${createdAt}` : ""}`;
+    const isDaily = dailyPuzzleId && puzzle.id === dailyPuzzleId;
+    const dailyTag = isDaily ? " · 今日挑战" : "";
+    option.textContent = `第${displayIndex}题${createdAt ? ` · ${createdAt}` : ""}${dailyTag}`;
     leaderboardSelect.appendChild(option);
   });
 
@@ -448,6 +576,13 @@ function refreshLeaderboardIfComplete(state) {
   if (selectedId && state.puzzle_id === selectedId) {
     loadLeaderboard(selectedId);
   }
+  if (dailyPuzzleId && state.puzzle_id === dailyPuzzleId) {
+    loadDailyLeaderboard();
+    loadDailyTrend();
+  }
+  loadAuthorStats();
+  loadDifficultyBoard();
+  loadOverallLeaderboard();
 }
 
 // 根据服务端状态渲染游戏内容与进度
@@ -459,6 +594,7 @@ function renderState(state) {
     titleRemaining.textContent = "0";
     wrongList.textContent = "无";
     puzzleStatus.textContent = "未开始";
+    updateDifficultyPanel(null);
     setInputEnabled(false);
     aiLogs = [];
     renderAiLog();
@@ -494,6 +630,8 @@ function renderState(state) {
       setInputEnabled(true);
     }
   }
+  updateDifficultyPanel(state);
+  updateHintButtonState();
 }
 
 // 统一的 JSON 请求封装
@@ -520,6 +658,7 @@ async function loadPuzzles() {
     const data = await requestJson("/api/puzzles");
     puzzlesCache = data.puzzles || [];
     updatePuzzleOptions();
+    loadDailyChallenge();
     if (!puzzlesCache.length) {
       setMessage("没有可用题目，请先在 data/puzzles/ 中添加。", "bad");
     }
@@ -668,6 +807,7 @@ async function loadCurrentUser() {
       nicknameInput.value = data.user.nickname;
     }
     if (isLoggedIn()) {
+      await loadCheckinStatus();
       await refreshState();
     }
   } catch (error) {
@@ -695,6 +835,7 @@ async function login() {
     nicknameInput.value = data.user.nickname || nickname;
     setMessage(`已登录：${data.user.nickname}`, "good");
     await loadPuzzles();
+    await loadCheckinStatus();
     await refreshState();
     if (leaderboardSelect.value) {
       loadLeaderboard(leaderboardSelect.value);
@@ -739,6 +880,558 @@ function updateAiLogVisibility() {
   }
   aiTrace.classList.toggle("is-collapsed", !aiLogExpanded);
   aiToggleBtn.textContent = aiLogExpanded ? "收起" : "展开";
+}
+
+function formatRate(numerator, denominator) {
+  const base = Number(denominator) || 0;
+  if (!base) {
+    return "—";
+  }
+  const rate = (Number(numerator) || 0) / base;
+  return `${Math.round(rate * 100)}%`;
+}
+
+function formatFixed(value, digits = 1) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return "—";
+  }
+  return num.toFixed(digits);
+}
+
+function appendBoardKpi(container, label, value) {
+  const item = document.createElement("span");
+  item.className = "board-kpi";
+  const kLabel = document.createElement("span");
+  kLabel.className = "board-kpi-label";
+  kLabel.textContent = label;
+  const kValue = document.createElement("span");
+  kValue.className = "board-kpi-value";
+  kValue.textContent = String(value);
+  item.append(kLabel, kValue);
+  container.appendChild(item);
+}
+
+function updateAuthorStatsVisibility() {
+  if (!authorStatsWrap || !authorToggleBtn) {
+    return;
+  }
+  authorStatsWrap.classList.toggle("is-collapsed", !authorStatsExpanded);
+  authorToggleBtn.textContent = authorStatsExpanded ? "收起" : "展开";
+}
+
+async function loadAuthorStats() {
+  if (!authorStatsList || !authorStatsEmpty) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/author_stats");
+    authorStatsCache = data.stats || [];
+    renderAuthorStats();
+  } catch (error) {
+    authorStatsList.innerHTML = "";
+    authorStatsEmpty.textContent = "加载失败";
+    authorStatsEmpty.classList.remove("is-hidden");
+  }
+}
+
+function renderAuthorStats() {
+  if (!authorStatsList || !authorStatsEmpty) {
+    return;
+  }
+  authorStatsList.innerHTML = "";
+  if (!authorStatsCache.length) {
+    authorStatsEmpty.textContent = "暂无数据";
+    authorStatsEmpty.classList.remove("is-hidden");
+    return;
+  }
+  authorStatsEmpty.classList.add("is-hidden");
+  authorStatsCache.forEach((stat, index) => {
+    const item = document.createElement("li");
+    item.className = "leaderboard-item board-item";
+    if (index === 0) {
+      item.classList.add("leaderboard-gold");
+    } else if (index === 1) {
+      item.classList.add("leaderboard-silver");
+    } else if (index === 2) {
+      item.classList.add("leaderboard-bronze");
+    }
+
+    const row = document.createElement("div");
+    row.className = "leaderboard-row";
+    const rank = document.createElement("span");
+    rank.className = "rank-badge";
+    if (index === 0) {
+      rank.textContent = "冠军";
+    } else if (index === 1) {
+      rank.textContent = "亚军";
+    } else if (index === 2) {
+      rank.textContent = "季军";
+    } else {
+      rank.textContent = `#${index + 1}`;
+    }
+    const nameWrap = document.createElement("div");
+    nameWrap.className = "leaderboard-name board-name";
+    const title = document.createElement("div");
+    title.className = "board-title";
+    title.textContent = stat.author_name || "(未命名)";
+    const startedRaw = Number(stat.started_players) || 0;
+    const completed = Number(stat.completion_count) || 0;
+    const started = Math.max(startedRaw, completed);
+    const sub = document.createElement("div");
+    sub.className = "board-sub";
+    sub.textContent = `通关 ${completed} · 完成率 ${formatRate(completed, started)} · 放弃率 ${formatRate(
+      started - completed,
+      started
+    )}`;
+    nameWrap.append(title, sub);
+    const metric = document.createElement("div");
+    metric.className = "board-metric";
+    metric.textContent = `出题 ${stat.puzzle_count ?? 0}`;
+    row.append(rank, nameWrap, metric);
+
+    const kpis = document.createElement("div");
+    kpis.className = "board-kpis";
+    appendBoardKpi(kpis, "开局", started);
+    appendBoardKpi(kpis, "尝试", stat.attempt_count ?? 0);
+    appendBoardKpi(kpis, "平均猜测", formatFixed(stat.avg_guesses, 1));
+
+    const foot = document.createElement("div");
+    foot.className = "board-foot";
+    foot.textContent = `最近通关：${formatTimestamp(stat.last_completed) || "暂无"}`;
+
+    item.append(row, kpis, foot);
+    authorStatsList.appendChild(item);
+  });
+}
+
+function formatDuration(seconds) {
+  const num = Number(seconds);
+  if (!Number.isFinite(num)) {
+    return "—";
+  }
+  const total = Math.max(0, Math.round(num));
+  if (total < 60) {
+    return `${total}s`;
+  }
+  const minutes = Math.floor(total / 60);
+  const remain = total % 60;
+  if (minutes < 60) {
+    return `${minutes}m${String(remain).padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours}h${String(mins).padStart(2, "0")}m`;
+}
+
+function mapDifficultyLabel(value) {
+  if (value === "easy" || value === 1) {
+    return "简单";
+  }
+  if (value === "medium" || value === 2) {
+    return "中等";
+  }
+  if (value === "hard" || value === 3) {
+    return "困难";
+  }
+  return "未设置";
+}
+
+function mapDifficultyValue(raw) {
+  if (raw === 1 || raw === "1") {
+    return "easy";
+  }
+  if (raw === 2 || raw === "2") {
+    return "medium";
+  }
+  if (raw === 3 || raw === "3") {
+    return "hard";
+  }
+  return "";
+}
+
+function updateDifficultyBoardVisibility() {
+  if (!difficultyBoardWrap || !difficultyToggleBtn) {
+    return;
+  }
+  difficultyBoardWrap.classList.toggle("is-collapsed", !difficultyBoardExpanded);
+  difficultyToggleBtn.textContent = difficultyBoardExpanded ? "收起" : "展开";
+}
+
+async function loadDifficultyBoard() {
+  if (!difficultyBoardList || !difficultyBoardEmpty) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/difficulty/board");
+    difficultyBoardCache = data.stats || [];
+    renderDifficultyBoard();
+  } catch (error) {
+    difficultyBoardList.innerHTML = "";
+    difficultyBoardEmpty.textContent = "加载失败";
+    difficultyBoardEmpty.classList.remove("is-hidden");
+  }
+}
+
+function renderDifficultyBoard() {
+  if (!difficultyBoardList || !difficultyBoardEmpty) {
+    return;
+  }
+  difficultyBoardList.innerHTML = "";
+  if (!difficultyBoardCache.length) {
+    difficultyBoardEmpty.textContent = "暂无数据";
+    difficultyBoardEmpty.classList.remove("is-hidden");
+    return;
+  }
+  difficultyBoardEmpty.classList.add("is-hidden");
+  difficultyBoardCache.forEach((stat, index) => {
+    const item = document.createElement("li");
+    item.className = "leaderboard-item board-item";
+    if (index === 0) {
+      item.classList.add("leaderboard-gold");
+    } else if (index === 1) {
+      item.classList.add("leaderboard-silver");
+    } else if (index === 2) {
+      item.classList.add("leaderboard-bronze");
+    }
+    const row = document.createElement("div");
+    row.className = "leaderboard-row";
+    const rank = document.createElement("span");
+    rank.className = "rank-badge";
+    if (index === 0) {
+      rank.textContent = "冠军";
+    } else if (index === 1) {
+      rank.textContent = "亚军";
+    } else if (index === 2) {
+      rank.textContent = "季军";
+    } else {
+      rank.textContent = `#${index + 1}`;
+    }
+    const nameWrap = document.createElement("div");
+    nameWrap.className = "leaderboard-name board-name";
+    const title = document.createElement("div");
+    title.className = "board-title";
+    const indexLabel = stat.index ? `第${stat.index}题` : "未编号";
+    title.textContent = `${indexLabel} · ${mapDifficultyLabel(stat.admin_difficulty)}`;
+    const avgDifficulty = formatFixed(stat.avg_difficulty, 2);
+    const sub = document.createElement("div");
+    sub.className = "board-sub";
+    sub.textContent = `玩家评分 ${avgDifficulty} · 评价 ${stat.vote_count ?? 0} · 尝试 ${stat.attempt_count ?? 0}`;
+    nameWrap.append(title, sub);
+    const metric = document.createElement("div");
+    metric.className = "board-metric";
+    metric.textContent = `评分 ${avgDifficulty}`;
+    row.append(rank, nameWrap, metric);
+
+    const startedRaw = Number(stat.started_players) || 0;
+    const completed = Number(stat.completion_count) || 0;
+    const started = Math.max(startedRaw, completed);
+    const totalGuesses = Number(stat.total_guesses) || 0;
+    const correctGuesses = Number(stat.correct_guesses) || 0;
+
+    const kpis = document.createElement("div");
+    kpis.className = "board-kpis";
+    appendBoardKpi(kpis, "完成率", formatRate(completed, started));
+    appendBoardKpi(kpis, "平均猜测", formatFixed(stat.avg_guesses, 1));
+    appendBoardKpi(kpis, "平均用时", formatDuration(stat.avg_duration));
+    appendBoardKpi(kpis, "命中率", formatRate(correctGuesses, totalGuesses));
+
+    const foot = document.createElement("div");
+    foot.className = "board-foot";
+    foot.textContent = `创建时间：${formatDateOnly(stat.created_at) || "未知"}`;
+    item.append(row, kpis, foot);
+    difficultyBoardList.appendChild(item);
+  });
+}
+
+function updateOverallVisibility() {
+  if (!overallWrap || !overallToggleBtn) {
+    return;
+  }
+  overallWrap.classList.toggle("is-collapsed", !overallExpanded);
+  overallToggleBtn.textContent = overallExpanded ? "收起" : "展开";
+}
+
+async function loadOverallLeaderboard() {
+  if (!overallList || !overallEmpty) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/overall_leaderboard");
+    overallCache = data.stats || [];
+    renderOverallLeaderboard();
+  } catch (error) {
+    overallList.innerHTML = "";
+    overallEmpty.textContent = "加载失败";
+    overallEmpty.classList.remove("is-hidden");
+  }
+}
+
+function renderOverallLeaderboard() {
+  if (!overallList || !overallEmpty) {
+    return;
+  }
+  overallList.innerHTML = "";
+  if (!overallCache.length) {
+    overallEmpty.textContent = "暂无数据";
+    overallEmpty.classList.remove("is-hidden");
+    return;
+  }
+  overallEmpty.classList.add("is-hidden");
+  overallCache.forEach((stat, index) => {
+    const item = document.createElement("li");
+    item.className = "leaderboard-item board-item";
+    if (index === 0) {
+      item.classList.add("leaderboard-gold");
+    } else if (index === 1) {
+      item.classList.add("leaderboard-silver");
+    } else if (index === 2) {
+      item.classList.add("leaderboard-bronze");
+    }
+    const row = document.createElement("div");
+    row.className = "leaderboard-row";
+    const rank = document.createElement("span");
+    rank.className = "rank-badge";
+    if (index === 0) {
+      rank.textContent = "冠军";
+    } else if (index === 1) {
+      rank.textContent = "亚军";
+    } else if (index === 2) {
+      rank.textContent = "季军";
+    } else {
+      rank.textContent = `#${index + 1}`;
+    }
+    const nameWrap = document.createElement("div");
+    nameWrap.className = "leaderboard-name board-name";
+    const title = document.createElement("div");
+    title.className = "board-title";
+    title.textContent = stat.nickname || "(未命名)";
+    const totalGuesses = Number(stat.total_guesses) || 0;
+    const correctGuesses = Number(stat.correct_guesses) || 0;
+    const avgGuesses = formatFixed(stat.avg_guesses, 1);
+    const sub = document.createElement("div");
+    sub.className = "board-sub";
+    sub.textContent = `平均猜测 ${avgGuesses} · 平均用时 ${formatDuration(stat.avg_duration)} · 命中率 ${formatRate(
+      correctGuesses,
+      totalGuesses
+    )}`;
+    nameWrap.append(title, sub);
+    const metric = document.createElement("div");
+    metric.className = "board-metric";
+    metric.textContent = `通关 ${stat.completion_count ?? 0}`;
+    row.append(rank, nameWrap, metric);
+
+    const kpis = document.createElement("div");
+    kpis.className = "board-kpis";
+    appendBoardKpi(kpis, "总猜测", totalGuesses);
+    appendBoardKpi(kpis, "正确", correctGuesses);
+
+    item.append(row, kpis);
+    overallList.appendChild(item);
+  });
+}
+
+function updateDailyBoardMeta() {
+  if (!dailyBoardMeta) {
+    return;
+  }
+  const countLabel = `今日完成 ${dailyCompletionCount}`;
+  const indexLabel = dailyIndex ? `第${dailyIndex}题` : "今日题目";
+  dailyBoardMeta.textContent = `${countLabel} · ${indexLabel}`;
+}
+
+async function loadDailyChallenge() {
+  if (!dailyHint) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/daily");
+    const prevDate = dailyDate;
+    dailyPuzzleId = data.puzzle_id || "";
+    dailyDate = data.date || "";
+    dailyIndex = data.index || 0;
+    if (prevDate && dailyDate !== prevDate) {
+      dailyCompletionCount = 0;
+    }
+    const indexLabel = data.index ? `第${data.index}题` : "今日题目";
+    const createdAt = formatDateOnly(data.created_at);
+    dailyHint.textContent = `${dailyDate} · ${indexLabel}${createdAt ? ` · ${createdAt}` : ""}`;
+    updateDailyBoardMeta();
+    updatePuzzleOptions();
+    loadDailyLeaderboard();
+    loadDailyTrend();
+  } catch (error) {
+    dailyHint.textContent = String(error.message || "今日挑战加载失败");
+  }
+}
+
+async function loadDailyLeaderboard() {
+  if (!dailyLeaderboardList || !dailyLeaderboardEmpty) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/daily/leaderboard?limit=5");
+    dailyPuzzleId = data.puzzle_id || dailyPuzzleId;
+    dailyDate = data.date || dailyDate;
+    dailyCompletionCount = Number(data.count) || 0;
+    updateDailyBoardMeta();
+    renderLeaderboardItems(data.entries || [], dailyLeaderboardList, dailyLeaderboardEmpty, 5);
+  } catch (error) {
+    dailyCompletionCount = 0;
+    updateDailyBoardMeta();
+    dailyLeaderboardEmpty.textContent = String(error.message || "加载失败");
+    dailyLeaderboardEmpty.style.display = "block";
+    dailyLeaderboardList.innerHTML = "";
+  }
+}
+
+async function loadDailyTrend() {
+  if (!dailyTrendBars) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/daily/trend?days=7");
+    const items = data.items || [];
+    const counts = items.map((item) => Number(item.count) || 0);
+    const maxCount = Math.max(1, ...counts);
+    dailyTrendBars.innerHTML = "";
+    items.forEach((item) => {
+      const wrap = document.createElement("div");
+      wrap.className = "trend-item";
+      const bar = document.createElement("div");
+      bar.className = "trend-bar";
+      const height = Math.round((Number(item.count) || 0) / maxCount * 28) + 6;
+      bar.style.height = `${height}px`;
+      bar.title = `${item.date} · ${item.count} 完成`;
+      const label = document.createElement("div");
+      label.className = "trend-label";
+      label.textContent = (item.date || "").slice(5);
+      wrap.append(bar, label);
+      dailyTrendBars.appendChild(wrap);
+    });
+  } catch (error) {
+    dailyTrendBars.innerHTML = "";
+  }
+}
+
+async function loadCheckinStatus() {
+  if (!isLoggedIn()) {
+    freeHintCount = 0;
+    setCheckinStatus("未登录");
+    updateHintButtonState();
+    return;
+  }
+  try {
+    const data = await requestJson("/api/checkin");
+    freeHintCount = Number(data.free_hints) || 0;
+    if (data.claimed) {
+      setCheckinStatus(freeHintCount > 0 ? `已签到 · 剩余 ${freeHintCount}` : "已签到 · 已使用");
+    } else {
+      setCheckinStatus("未签到");
+    }
+  } catch (error) {
+    setCheckinStatus("签到状态异常");
+  }
+  updateHintButtonState();
+}
+
+async function claimCheckin() {
+  if (!requireLogin()) {
+    return;
+  }
+  try {
+    const data = await requestJson("/api/checkin", { method: "POST", body: JSON.stringify({}) });
+    freeHintCount = Number(data.free_hints) || 0;
+    setCheckinStatus(freeHintCount > 0 ? `已签到 · 剩余 ${freeHintCount}` : "已签到");
+    updateHintButtonState();
+    setMessage("签到成功，已获得提示卡。", "good");
+  } catch (error) {
+    setMessage(`签到失败：${error.message}`, "bad");
+  }
+}
+
+async function useHint() {
+  if (!requireLogin()) {
+    return;
+  }
+  if (!currentState) {
+    setMessage("请先开始游戏。", "bad");
+    return;
+  }
+  if (currentState.is_complete) {
+    setMessage("本题已完成，无需提示。", "good");
+    return;
+  }
+  try {
+    const data = await requestJson("/api/hint", { method: "POST", body: JSON.stringify({}) });
+    renderState(data.state);
+    refreshLeaderboardIfComplete(data.state);
+    if (data.free_used) {
+      freeHintCount = Math.max(0, freeHintCount - 1);
+      setCheckinStatus(freeHintCount > 0 ? `已签到 · 剩余 ${freeHintCount}` : "已签到 · 已使用");
+      setMessage(`揭示正文字：${data.revealed}（免费提示）`, "good");
+    } else {
+      setMessage(`揭示正文字：${data.revealed}（扣 ${data.penalty} 分）`, "bad");
+    }
+    updateHintButtonState();
+  } catch (error) {
+    setMessage(`提示失败：${error.message}`, "bad");
+  }
+}
+
+function setDifficultyStatus(text) {
+  if (!difficultyStatus) {
+    return;
+  }
+  difficultyStatus.textContent = text;
+}
+
+function updateDifficultyPanel(state) {
+  if (!difficultyPanel) {
+    return;
+  }
+  if (!state || !state.is_complete) {
+    difficultyPanel.classList.add("is-hidden");
+    lastDifficultyPuzzleId = "";
+    currentDifficulty = "";
+    setDifficultyStatus("未评价");
+    return;
+  }
+  difficultyPanel.classList.remove("is-hidden");
+  if (state.puzzle_id && state.puzzle_id !== lastDifficultyPuzzleId) {
+    lastDifficultyPuzzleId = state.puzzle_id;
+    loadMyDifficulty(state.puzzle_id);
+  }
+}
+
+async function loadMyDifficulty(puzzleId) {
+  if (!puzzleId) {
+    return;
+  }
+  try {
+    const data = await requestJson(`/api/difficulty/mine?puzzle_id=${encodeURIComponent(puzzleId)}`);
+    currentDifficulty = mapDifficultyValue(data.difficulty);
+  } catch (error) {
+    currentDifficulty = "";
+  }
+  setDifficultyStatus(currentDifficulty ? `已评价：${mapDifficultyLabel(currentDifficulty)}` : "未评价");
+}
+
+async function submitDifficulty(puzzleId, difficulty) {
+  if (!puzzleId) {
+    return;
+  }
+  try {
+    await requestJson("/api/difficulty/vote", {
+      method: "POST",
+      body: JSON.stringify({ puzzle_id: puzzleId, difficulty }),
+    });
+    currentDifficulty = difficulty;
+    setDifficultyStatus(`已评价：${mapDifficultyLabel(difficulty)}`);
+    loadDifficultyBoard();
+  } catch (error) {
+    setMessage(`难度评价失败：${error.message}`, "bad");
+  }
 }
 
 async function aiStep() {
@@ -854,6 +1547,14 @@ refreshBtn.addEventListener("click", () => {
   loadPuzzles();
 });
 
+if (filterUnfinishedBtn) {
+  filterUnfinishedBtn.addEventListener("click", () => {
+    filterUnfinishedOnly = !filterUnfinishedOnly;
+    updateFilterUnfinishedState();
+    updatePuzzleOptions();
+  });
+}
+
 loginBtn.addEventListener("click", () => {
   login();
 });
@@ -886,6 +1587,12 @@ if (aiAccessSaveLocalBtn) {
   });
 }
 
+if (hintBtn) {
+  hintBtn.addEventListener("click", () => {
+    useHint();
+  });
+}
+
 guessBtn.addEventListener("click", () => {
   submitGuess();
 });
@@ -898,6 +1605,72 @@ if (aiToggleBtn) {
   aiToggleBtn.addEventListener("click", () => {
     aiLogExpanded = !aiLogExpanded;
     updateAiLogVisibility();
+  });
+}
+
+if (authorToggleBtn) {
+  authorToggleBtn.addEventListener("click", () => {
+    authorStatsExpanded = !authorStatsExpanded;
+    updateAuthorStatsVisibility();
+  });
+}
+
+if (difficultyToggleBtn) {
+  difficultyToggleBtn.addEventListener("click", () => {
+    difficultyBoardExpanded = !difficultyBoardExpanded;
+    updateDifficultyBoardVisibility();
+  });
+}
+
+if (overallToggleBtn) {
+  overallToggleBtn.addEventListener("click", () => {
+    overallExpanded = !overallExpanded;
+    updateOverallVisibility();
+  });
+}
+
+if (dailyStartBtn) {
+  dailyStartBtn.addEventListener("click", () => {
+    if (!dailyPuzzleId) {
+      setMessage("今日挑战加载中，请稍后重试。", "bad");
+      return;
+    }
+    if (!puzzlesCache.find((puzzle) => puzzle.id === dailyPuzzleId)) {
+      setMessage("今日挑战题目不存在，请刷新题库。", "bad");
+      return;
+    }
+    puzzleSelect.value = dailyPuzzleId;
+    leaderboardSelect.value = dailyPuzzleId;
+    loadLeaderboard(dailyPuzzleId);
+    startGame();
+  });
+}
+
+if (dailyBoardRefreshBtn) {
+  dailyBoardRefreshBtn.addEventListener("click", () => {
+    loadDailyChallenge();
+  });
+}
+
+if (checkinBtn) {
+  checkinBtn.addEventListener("click", () => {
+    claimCheckin();
+  });
+}
+
+if (difficultyPanel) {
+  difficultyPanel.querySelectorAll("button[data-difficulty]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!currentState || !currentState.is_complete) {
+        setMessage("通关后才能评价难度。", "bad");
+        return;
+      }
+      const level = button.getAttribute("data-difficulty");
+      if (!level) {
+        return;
+      }
+      submitDifficulty(currentState.puzzle_id, level);
+    });
   });
 }
 
@@ -935,3 +1708,12 @@ applyLoginState(null);
 loadPuzzles().then(() => loadCurrentUser());
 updateAiLogVisibility();
 renderAiAccessHint();
+updateAuthorStatsVisibility();
+loadAuthorStats();
+updateDifficultyBoardVisibility();
+updateOverallVisibility();
+loadDifficultyBoard();
+loadOverallLeaderboard();
+loadDailyChallenge();
+loadDailyTrend();
+updateFilterUnfinishedState();

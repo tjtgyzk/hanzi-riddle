@@ -26,11 +26,42 @@ const overwriteCheck = document.getElementById("overwriteCheck");
 const generatePuzzleBtn = document.getElementById("generatePuzzleBtn");
 const savePuzzleBtn = document.getElementById("savePuzzleBtn");
 const refreshPuzzleListBtn = document.getElementById("refreshPuzzleListBtn");
-const puzzleList = document.getElementById("puzzleList");
+const dailyPuzzleList = document.getElementById("dailyPuzzleList");
+const normalPuzzleList = document.getElementById("normalPuzzleList");
 const refreshUserListBtn = document.getElementById("refreshUserListBtn");
 const userList = document.getElementById("userList");
+const refreshAuthorStatsBtn = document.getElementById("refreshAuthorStatsBtn");
+const authorStatsList = document.getElementById("authorStatsList");
+const authorStatsEmpty = document.getElementById("authorStatsEmpty");
+const dailyAutoCheck = document.getElementById("dailyAutoCheck");
+const dailyAutoSaveBtn = document.getElementById("dailyAutoSaveBtn");
+const dailyAutoStatus = document.getElementById("dailyAutoStatus");
+const puzzleSearchInput = document.getElementById("puzzleSearchInput");
+const puzzleFilterSelect = document.getElementById("puzzleFilterSelect");
 
 let adminToken = "";
+
+const SESSION_KEY = "guess_game_session_id";
+
+function createSessionId() {
+  if (window.crypto && window.crypto.getRandomValues) {
+    const buf = new Uint8Array(12);
+    window.crypto.getRandomValues(buf);
+    return Array.from(buf)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function getSessionId() {
+  let sessionId = localStorage.getItem(SESSION_KEY);
+  if (!sessionId) {
+    sessionId = createSessionId();
+    localStorage.setItem(SESSION_KEY, sessionId);
+  }
+  return sessionId;
+}
 
 function getAdminToken() {
   return adminToken;
@@ -67,6 +98,7 @@ function setAdminNotice(text, type) {
 async function requestJson(url, options = {}) {
   const headers = {
     "Content-Type": "application/json",
+    "X-Session-Id": getSessionId(),
     ...(options.headers || {}),
   };
   const token = getAdminToken();
@@ -143,12 +175,40 @@ async function handleAdminLogin() {
   setAdminNotice("验证通过，欢迎进入管理后台。", "good");
   await fetchAiProfiles();
   renderAiProfiles();
+  await fetchAiAccessStatus();
+  renderAiAccessStatus();
+  try {
+    await fetchPuzzleList();
+    renderPuzzleList();
+  } catch (error) {
+    setAdminNotice(`题目列表加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchUserList();
+    renderUserList();
+  } catch (error) {
+    setAdminNotice(`用户列表加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchAuthorStats();
+    renderAuthorStats();
+  } catch (error) {
+    setAdminNotice(`排行加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchDailyAuto();
+    renderDailyAuto();
+  } catch (error) {
+    setAdminNotice(`每日题池规则读取失败：${error.message}`, "bad");
+  }
 }
 
 let profilesCache = [];
 let puzzlesCache = [];
 let aiAccessConfigured = false;
 let usersCache = [];
+let authorStatsCache = [];
+let dailyAutoEnabled = false;
 
 async function fetchAiProfiles() {
   const data = await requestJson("/api/admin/ai/profiles");
@@ -159,6 +219,9 @@ async function fetchAiProfiles() {
 async function fetchAiAccessStatus() {
   const data = await requestJson("/api/admin/ai/access");
   aiAccessConfigured = Boolean(data.configured);
+  if (aiAccessCode) {
+    aiAccessCode.value = data.access_code ? String(data.access_code) : "";
+  }
   return aiAccessConfigured;
 }
 
@@ -295,18 +358,55 @@ async function fetchPuzzleList() {
 }
 
 function renderPuzzleList() {
-  if (!puzzleList) {
+  if (!dailyPuzzleList || !normalPuzzleList) {
     return;
   }
-  puzzleList.innerHTML = "";
-  if (!puzzlesCache.length) {
+  dailyPuzzleList.innerHTML = "";
+  normalPuzzleList.innerHTML = "";
+  const keyword = (puzzleSearchInput ? puzzleSearchInput.value : "").trim().toLowerCase();
+  const filter = puzzleFilterSelect ? puzzleFilterSelect.value : "all";
+  const filtered = puzzlesCache.filter((puzzle) => {
+    const title = String(puzzle.title || "").toLowerCase();
+    const pid = String(puzzle.id || "").toLowerCase();
+    const body = String(puzzle.body || "").toLowerCase();
+    if (keyword && !title.includes(keyword) && !pid.includes(keyword) && !body.includes(keyword)) {
+      return false;
+    }
+    const isDaily = Boolean(puzzle.is_daily);
+    const isPlayed = Boolean(puzzle.is_played);
+    if (filter === "daily") {
+      return isDaily;
+    }
+    if (filter === "normal") {
+      return !isDaily;
+    }
+    if (filter === "played") {
+      return isPlayed;
+    }
+    if (filter === "unplayed") {
+      return !isPlayed;
+    }
+    return true;
+  });
+  const dailyItems = filtered.filter((puzzle) => puzzle.is_daily);
+  const normalItems = filtered.filter((puzzle) => !puzzle.is_daily);
+  const emptyPrefix = filter === "all" ? "暂无" : "筛选后暂无";
+  renderPuzzleGroup(dailyPuzzleList, dailyItems, `${emptyPrefix}每日题`);
+  renderPuzzleGroup(normalPuzzleList, normalItems, `${emptyPrefix}普通题目`);
+}
+
+function renderPuzzleGroup(container, puzzles, emptyText) {
+  if (!container) {
+    return;
+  }
+  if (!puzzles.length) {
     const empty = document.createElement("div");
     empty.className = "hint";
-    empty.textContent = "暂无题目";
-    puzzleList.appendChild(empty);
+    empty.textContent = emptyText;
+    container.appendChild(empty);
     return;
   }
-  puzzlesCache.forEach((puzzle) => {
+  puzzles.forEach((puzzle) => {
     const item = document.createElement("div");
     item.className = "puzzle-item";
     const header = document.createElement("div");
@@ -316,7 +416,8 @@ function renderPuzzleList() {
     title.textContent = puzzle.title || "(无标题)";
     const meta = document.createElement("div");
     meta.className = "puzzle-meta";
-    meta.textContent = `ID: ${puzzle.id}`;
+    const playedLabel = puzzle.is_played ? " · 已游玩" : "";
+    meta.textContent = `ID: ${puzzle.id}${playedLabel}`;
     header.append(title, meta);
     const body = document.createElement("div");
     body.className = "puzzle-body";
@@ -324,6 +425,80 @@ function renderPuzzleList() {
     body.addEventListener("click", () => {
       body.classList.toggle("is-expanded");
     });
+    const difficultyRow = document.createElement("div");
+    difficultyRow.className = "puzzle-difficulty-row";
+    const difficultyLabel = document.createElement("div");
+    difficultyLabel.className = "puzzle-meta";
+    difficultyLabel.textContent = "管理员难度";
+    const difficultySelect = document.createElement("select");
+    difficultySelect.className = "puzzle-difficulty-select";
+    const difficultyOptions = [
+      { value: "", label: "未设置" },
+      { value: "easy", label: "简单" },
+      { value: "medium", label: "中等" },
+      { value: "hard", label: "困难" },
+    ];
+    difficultyOptions.forEach((optionItem) => {
+      const option = document.createElement("option");
+      option.value = optionItem.value;
+      option.textContent = optionItem.label;
+      difficultySelect.appendChild(option);
+    });
+    difficultySelect.value = puzzle.admin_difficulty || "";
+    const difficultyBtn = document.createElement("button");
+    difficultyBtn.className = "btn ghost small";
+    difficultyBtn.textContent = "保存难度";
+    difficultyBtn.addEventListener("click", async () => {
+      try {
+        await requestJson("/api/admin/puzzles/difficulty", {
+          method: "POST",
+          body: JSON.stringify({
+            puzzle_id: puzzle.id,
+            difficulty: difficultySelect.value,
+          }),
+        });
+        setAdminNotice("难度已保存。", "good");
+      } catch (error) {
+        setAdminNotice(`保存难度失败：${error.message}`, "bad");
+      }
+    });
+    difficultyRow.append(difficultyLabel, difficultySelect, difficultyBtn);
+    const dailyRow = document.createElement("div");
+    dailyRow.className = "puzzle-difficulty-row";
+    const dailyLabel = document.createElement("div");
+    dailyLabel.className = "puzzle-meta";
+    dailyLabel.textContent = "每日题";
+    const dailyLocked = Boolean(puzzle.is_played) && !puzzle.is_daily;
+    if (dailyLocked) {
+      const lock = document.createElement("div");
+      lock.className = "puzzle-lock";
+      lock.textContent = "已游玩，不可加入每日题池";
+      dailyRow.append(dailyLabel, lock);
+    } else {
+      const dailyCheck = document.createElement("input");
+      dailyCheck.type = "checkbox";
+      dailyCheck.checked = Boolean(puzzle.is_daily);
+      const dailyBtn = document.createElement("button");
+      dailyBtn.className = "btn ghost small";
+      dailyBtn.textContent = "保存每日题";
+      dailyBtn.addEventListener("click", async () => {
+        try {
+          await requestJson("/api/admin/puzzles/daily", {
+            method: "POST",
+            body: JSON.stringify({
+              puzzle_id: puzzle.id,
+              is_daily: dailyCheck.checked,
+            }),
+          });
+          setAdminNotice("每日题设置已保存。", "good");
+          await fetchPuzzleList();
+          renderPuzzleList();
+        } catch (error) {
+          setAdminNotice(`保存每日题失败：${error.message}`, "bad");
+        }
+      });
+      dailyRow.append(dailyLabel, dailyCheck, dailyBtn);
+    }
     const actions = document.createElement("div");
     actions.className = "form-actions";
     const fillBtn = document.createElement("button");
@@ -357,8 +532,8 @@ function renderPuzzleList() {
       }
     });
     actions.append(fillBtn, deleteBtn);
-    item.append(header, body, actions);
-    puzzleList.appendChild(item);
+    item.append(header, body, difficultyRow, dailyRow, actions);
+    container.appendChild(item);
   });
 }
 
@@ -384,6 +559,18 @@ async function fetchUserList() {
   const data = await requestJson("/api/admin/users");
   usersCache = data.users || [];
   return usersCache;
+}
+
+async function fetchAuthorStats() {
+  const data = await requestJson("/api/admin/author_stats");
+  authorStatsCache = data.stats || [];
+  return authorStatsCache;
+}
+
+async function fetchDailyAuto() {
+  const data = await requestJson("/api/admin/daily/auto");
+  dailyAutoEnabled = Boolean(data.enabled);
+  return dailyAutoEnabled;
 }
 
 function renderUserList() {
@@ -419,6 +606,90 @@ function renderUserList() {
     item.append(header, lastSeen, createdAt);
     userList.appendChild(item);
   });
+}
+
+function formatRate(numerator, denominator) {
+  const base = Number(denominator) || 0;
+  if (!base) {
+    return "—";
+  }
+  const rate = (Number(numerator) || 0) / base;
+  return `${Math.round(rate * 100)}%`;
+}
+
+function renderAuthorStats() {
+  if (!authorStatsList || !authorStatsEmpty) {
+    return;
+  }
+  authorStatsList.innerHTML = "";
+  if (!authorStatsCache.length) {
+    authorStatsEmpty.classList.remove("is-hidden");
+    return;
+  }
+  authorStatsEmpty.classList.add("is-hidden");
+  authorStatsCache.forEach((stat, index) => {
+    const item = document.createElement("li");
+    item.className = "author-stats-item";
+    if (index === 0) {
+      item.classList.add("is-gold");
+    } else if (index === 1) {
+      item.classList.add("is-silver");
+    } else if (index === 2) {
+      item.classList.add("is-bronze");
+    }
+
+    const header = document.createElement("div");
+    header.className = "author-stats-header";
+    const rank = document.createElement("span");
+    rank.className = "author-rank";
+    rank.textContent = `#${index + 1}`;
+    const name = document.createElement("span");
+    name.className = "author-name";
+    name.textContent = stat.author_name || "(未命名)";
+    header.append(rank, name);
+
+    const meta = document.createElement("div");
+    meta.className = "author-stats-meta";
+    const startedRaw = Number(stat.started_players) || 0;
+    const completed = Number(stat.completion_count) || 0;
+    const started = Math.max(startedRaw, completed);
+    const items = [
+      { label: "出题", value: stat.puzzle_count ?? 0 },
+      { label: "开局", value: started },
+      { label: "通关", value: completed },
+      { label: "完成率", value: formatRate(completed, started) },
+      { label: "放弃率", value: formatRate(started - completed, started) },
+      { label: "尝试", value: stat.attempt_count ?? 0 },
+    ];
+    items.forEach((entry) => {
+      const box = document.createElement("div");
+      box.className = "author-meta-item";
+      const label = document.createElement("div");
+      label.className = "author-meta-label";
+      label.textContent = entry.label;
+      const value = document.createElement("div");
+      value.className = "author-meta-value";
+      value.textContent = String(entry.value);
+      box.append(label, value);
+      meta.appendChild(box);
+    });
+
+    const foot = document.createElement("div");
+    foot.className = "author-stats-foot";
+    const lastCompleted = formatTimestamp(stat.last_completed);
+    foot.textContent = `最近通关：${lastCompleted || "暂无"}`;
+
+    item.append(header, meta, foot);
+    authorStatsList.appendChild(item);
+  });
+}
+
+function renderDailyAuto() {
+  if (!dailyAutoCheck || !dailyAutoStatus) {
+    return;
+  }
+  dailyAutoCheck.checked = dailyAutoEnabled;
+  dailyAutoStatus.textContent = dailyAutoEnabled ? "已开启" : "未开启";
 }
 
 async function generatePuzzleBody() {
@@ -487,7 +758,6 @@ aiAccessSaveBtn.addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ access_code: code }),
     });
-    aiAccessCode.value = "";
     await fetchAiAccessStatus();
     renderAiAccessStatus();
     setAdminNotice("AI 访问码已保存。", "good");
@@ -525,10 +795,46 @@ if (refreshPuzzleListBtn) {
   });
 }
 
+if (puzzleSearchInput) {
+  puzzleSearchInput.addEventListener("input", () => {
+    renderPuzzleList();
+  });
+}
+
+if (puzzleFilterSelect) {
+  puzzleFilterSelect.addEventListener("change", () => {
+    renderPuzzleList();
+  });
+}
+
 if (refreshUserListBtn) {
   refreshUserListBtn.addEventListener("click", async () => {
     await fetchUserList();
     renderUserList();
+  });
+}
+
+if (refreshAuthorStatsBtn) {
+  refreshAuthorStatsBtn.addEventListener("click", async () => {
+    await fetchAuthorStats();
+    renderAuthorStats();
+  });
+}
+
+if (dailyAutoSaveBtn) {
+  dailyAutoSaveBtn.addEventListener("click", async () => {
+    try {
+      const enabled = Boolean(dailyAutoCheck && dailyAutoCheck.checked);
+      await requestJson("/api/admin/daily/auto", {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      });
+      dailyAutoEnabled = enabled;
+      renderDailyAuto();
+      setAdminNotice("每日题池规则已保存。", "good");
+    } catch (error) {
+      setAdminNotice(`保存规则失败：${error.message}`, "bad");
+    }
   });
 }
 
@@ -551,10 +857,30 @@ async function initAdmin() {
   renderAiProfiles();
   await fetchAiAccessStatus();
   renderAiAccessStatus();
-  await fetchPuzzleList();
-  renderPuzzleList();
-  await fetchUserList();
-  renderUserList();
+  try {
+    await fetchPuzzleList();
+    renderPuzzleList();
+  } catch (error) {
+    setAdminNotice(`题目列表加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchUserList();
+    renderUserList();
+  } catch (error) {
+    setAdminNotice(`用户列表加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchAuthorStats();
+    renderAuthorStats();
+  } catch (error) {
+    setAdminNotice(`排行加载失败：${error.message}`, "bad");
+  }
+  try {
+    await fetchDailyAuto();
+    renderDailyAuto();
+  } catch (error) {
+    setAdminNotice(`每日题池规则读取失败：${error.message}`, "bad");
+  }
 }
 
 initAdmin();
